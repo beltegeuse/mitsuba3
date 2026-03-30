@@ -5,7 +5,7 @@ import itertools
 import sys
 
 import pytest
-from mitsuba.scalar_rgb import Struct, StructConverter
+from mitsuba import Struct, StructConverter
 
 
 # List of supported conversions
@@ -44,9 +44,7 @@ def check_conversion(conv, src_fmt, dst_fmt, data_in,
         pytest.skip('half precision floats unsupported in Python < 3.6')
     src_data = struct.pack(src_fmt, *data_in)
     import binascii
-    print(binascii.hexlify(src_data).decode('utf8'))
     converted = conv.convert(src_data)
-    print(binascii.hexlify(converted).decode('utf8'))
     dst_data = struct.unpack(dst_fmt, converted)
     ref = data_out if data_out is not None else data_in
     for i in range(len(dst_data)):
@@ -219,7 +217,7 @@ def test08_roundtrip_normalization_int2int(param):
     values_out = np.rint(values_out)
     values_out = np.maximum(values_out, s2_range[0])
     values_out = np.minimum(values_out, s2_range[1])
-    values_out = np.array(values_out, s2.dtype()['val'])
+    values_out = np.array(values_out)
     check_conversion(s, '@' + (s1_dtype * len(values_in)),
                         '@' + (param[0] * len(values_in)),
                      values_in, values_out)
@@ -360,14 +358,15 @@ def test14_weight(param):
 
 
 def test15_test_dither():
-    from mitsuba.scalar_rgb import Bitmap
     import numpy.linalg as la
+    import mitsuba as mi
+    mi.set_variant('scalar_rgb')
 
-    b = Bitmap(Bitmap.PixelFormat.Y, Struct.Type.Float32, [10, 256])
+    b = mi.Bitmap(mi.Bitmap.PixelFormat.Y, Struct.Type.Float32, [10, 256])
     value = np.linspace(0, 1 / 255.0, 10)
     np.array(b, copy=False)[:, :] = np.tile(value, (256, 1))
-    b = b.convert(Bitmap.PixelFormat.Y, Struct.Type.UInt8, False)
-    b = b.convert(Bitmap.PixelFormat.Y, Struct.Type.Float32, False)
+    b = b.convert(mi.Bitmap.PixelFormat.Y, Struct.Type.UInt8, False)
+    b = b.convert(mi.Bitmap.PixelFormat.Y, Struct.Type.Float32, False)
     err = la.norm(np.mean(np.array(b, copy=False), axis=(0)) - value)
     assert(err < 5e-4)
 

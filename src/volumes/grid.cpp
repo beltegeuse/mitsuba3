@@ -19,7 +19,6 @@ Grid-based volume data source (:monosp:`gridvolume`)
 ----------------------------------------------------
 
 .. pluginparameters::
- :extra-rows: 6
 
  * - filename
    - |string|
@@ -30,6 +29,22 @@ Grid-based volume data source (:monosp:`gridvolume`)
    - When creating a grid volume at runtime, e.g. from Python or C++,
      an existing ``VolumeGrid`` instance can be passed directly rather than
      loading it from the filesystem with :paramtype:`filename`.
+
+ * - use_grid_bbox
+   - |bool|
+   - When set to ``true``, the bounding box information contained in the
+     ``VolumeGrid`` object (or the file it was loaded from) will be used. By
+     default, it is assumed that the grid is defined in the unit cube spanning
+     (0, 0, 0) x (1, 1, 1). Any evaluation of the volume outside of the bounding
+     box is handled by the ``wrap_mode``. (Default: false)
+
+ * - data
+   - |tensor|
+   - Tensor array containing the grid data. This parameter can only be specified
+     when building this plugin at runtime from Python or C++ and cannot be
+     specified in the XML scene description. The :paramtype:`raw` parameter must
+     also be set to :monosp:`true` when using a tensor.
+   - |exposed|, |differentiable|
 
  * - filter_type
    - |string|
@@ -68,11 +83,6 @@ Grid-based volume data source (:monosp:`gridvolume`)
    - Hardware acceleration features can be used in CUDA mode. These features can
      cause small differences as hardware interpolation methods typically have a
      loss of precision (not exactly 32-bit arithmetic). (Default: true)
-
- * - data
-   - |tensor|
-   - Tensor array containing the grid data.
-   - |exposed|, |differentiable|
 
 This class implements access to volume data stored on a 3D grid using a
 simple binary exchange format (compatible with Mitsuba 0.6). When appropriate,
@@ -152,7 +162,7 @@ public:
     MI_IMPORT_TYPES(VolumeGrid)
 
     GridVolume(const Properties &props) : Base(props) {
-        std::string filter_type_str = props.string("filter_type", "trilinear");
+        std::string_view filter_type_str = props.get<std::string_view>("filter_type", "trilinear");
         dr::FilterMode filter_mode;
         if (filter_type_str == "nearest")
             filter_mode = dr::FilterMode::Nearest;
@@ -162,7 +172,7 @@ public:
             Throw("Invalid filter type \"%s\", must be one of: \"nearest\" or "
                   "\"trilinear\"!", filter_type_str);
 
-        std::string wrap_mode_st = props.string("wrap_mode", "clamp");
+        std::string_view wrap_mode_st = props.get<std::string_view>("wrap_mode", "clamp");
         dr::WrapMode wrap_mode;
         if (wrap_mode_st == "repeat")
             wrap_mode = dr::WrapMode::Repeat;
@@ -175,82 +185,117 @@ public:
                   "\"mirror\", or \"clamp\"!",
                   wrap_mode_st);
 
-        ref<VolumeGrid> volume_grid;
-        if (props.has_property("grid")) {
-            // Creates a Bitmap texture directly from an existing Bitmap object
-            if (props.has_property("filename"))
-                Throw("Cannot specify both \"grid\" and \"filename\".");
-            Log(Debug, "Loading volume grid from memory...");
-            // Note: ref-counted, so we don't have to worry about lifetime
-            ref<Object> other = props.object("grid");
-            VolumeGrid *grid = dynamic_cast<VolumeGrid *>(other.get());
-            if (!grid)
-                Throw("Property \"grid\" must be a VolumeGrid instance.");
-            volume_grid = grid;
-        } else {
-            FileResolver *fs = Thread::thread()->file_resolver();
-            fs::path file_path = fs->resolve(props.string("filename"));
-            if (!fs::exists(file_path))
-                Log(Error, "\"%s\": file does not exist!", file_path);
-            volume_grid = new VolumeGrid(file_path);
-        }
-
         m_raw = props.get<bool>("raw", false);
-
         m_accel = props.get<bool>("accel", true);
 
-        ScalarVector3i res = volume_grid->size();
-        ScalarUInt32 size = dr::prod(res);
+        // Load volume data
+        ref<VolumeGrid> volume_grid = nullptr;
+        TensorXf* tensor = nullptr;
+        {
+            ScalarVector3u res;
+            ScalarUInt32 channel_count = 0;
 
-        // Apply spectral conversion if necessary
-        if (is_spectral_v<Spectrum> && volume_grid->channel_count() == 3 &&
-            !m_raw) {
-            ScalarFloat *ptr = volume_grid->data();
+            if (props.has_property("grid")) {
+                // Creates a Bitmap texture directly from an existing Bitmap object
+                if (props.has_property("filename"))
+                    Throw("Cannot specify both \"grid\" and \"filename\".");
+                Log(Debug, "Loading volume grid from memory...");
+                // Note: ref-counted, so we don't have to worry about lifetime
+                ref<Object> other = props.get<ref<Object>>("grid");
+                volume_grid = dynamic_cast<VolumeGrid *>(other.get());
+                if (!volume_grid)
+                    Throw("Property \"grid\" must be a VolumeGrid instance.");
+                res = volume_grid->size();
+                channel_count = (uint32_t) volume_grid->channel_count();
+            } else if(props.has_property("data")) {
+                tensor = const_cast<TensorXf*>(&props.get_any<TensorXf>("data"));
+                if (tensor->ndim() != 3 && tensor->ndim() != 4)
+                    Throw("Tensor->has %ul dimensions. Expected 3 or 4", tensor->ndim());
+                res = { (uint32_t) tensor->shape(2), (uint32_t) tensor->shape(1), (uint32_t) tensor->shape(0) };
+                channel_count = tensor->ndim() == 4 ? (uint32_t) tensor->shape(3) : 1;
 
-            auto scaled_data =
-                std::unique_ptr<ScalarFloat[]>(new ScalarFloat[size * 4]);
-            ScalarFloat *scaled_data_ptr = scaled_data.get();
-            ScalarFloat max = 0.0;
-            for (ScalarUInt32 i = 0; i < size; ++i) {
-                ScalarColor3f rgb = dr::load<ScalarColor3f>(ptr);
-                // TODO: Make this scaling optional if the RGB values are
-                // between 0 and 1
-                ScalarFloat scale = dr::max(rgb) * 2.f;
-                ScalarColor3f rgb_norm =
-                    rgb / dr::maximum((ScalarFloat) 1e-8, scale);
-                ScalarVector3f coeff = srgb_model_fetch(rgb_norm);
-                max = dr::maximum(max, scale);
-                dr::store(scaled_data_ptr,
-                          dr::concat(coeff, dr::Array<ScalarFloat, 1>(scale)));
-                ptr += 3;
-                scaled_data_ptr += 4;
+                if (channel_count != 1 && channel_count != 3 && channel_count != 6)
+                    Throw("Tensor shape at index 3 is %lu invalid. Only volumes with 1, 3 or 6 "
+                          "channels are supported!", to_string(), channel_count);
+            } else {
+                FileResolver *fs = file_resolver();
+                fs::path file_path = fs->resolve(props.get<std::string_view>("filename"));
+                if (!fs::exists(file_path))
+                    Log(Error, "\"%s\": file does not exist!", file_path);
+                volume_grid = new VolumeGrid(file_path);
+                res = volume_grid->size();
+                channel_count = (uint32_t) volume_grid->channel_count();
             }
-            m_max = (float) max;
 
-            size_t shape[4] = {
-                (size_t) res.z(),
-                (size_t) res.y(),
-                (size_t) res.x(),
-                4
-            };
-            m_texture = Texture3f(TensorXf(scaled_data.get(), 4, shape),
-                                  m_accel, m_accel, filter_mode, wrap_mode);
-        } else {
-            size_t shape[4] = {
-                (size_t) res.z(),
-                (size_t) res.y(),
-                (size_t) res.x(),
-                volume_grid->channel_count()
-            };
-            m_texture = Texture3f(TensorXf(volume_grid->data(), 4, shape),
-                                  m_accel, m_accel, filter_mode, wrap_mode);
-            m_max = volume_grid->max();
-            m_max_per_channel.resize(volume_grid->channel_count());
-            volume_grid->max_per_channel(m_max_per_channel.data());
-            m_channel_count = (uint32_t) volume_grid->channel_count();
+            ScalarUInt32 size = dr::prod(res);
+
+            // Apply spectral conversion if necessary
+            if (is_spectral_v<Spectrum> && channel_count == 3 &&
+                !m_raw) {
+                if (tensor)
+                    Throw("Spectral conversion of tensor input is not supported "
+                          "and requires a volume grid");
+
+                ScalarFloat *ptr = volume_grid->data();
+
+                auto scaled_data =
+                    std::unique_ptr<ScalarFloat[]>(new ScalarFloat[size * 4]);
+                ScalarFloat *scaled_data_ptr = scaled_data.get();
+                ScalarFloat max = 0.0;
+                for (ScalarUInt32 i = 0; i < size; ++i) {
+                    ScalarColor3f rgb = dr::load<ScalarColor3f>(ptr);
+                    // TODO: Make this scaling optional if the RGB values are
+                    // between 0 and 1
+                    ScalarFloat scale = dr::max(rgb) * 2.f;
+                    ScalarColor3f rgb_norm =
+                        rgb / dr::maximum((ScalarFloat) 1e-8, scale);
+                    ScalarVector3f coeff = srgb_model_fetch(rgb_norm);
+                    max = dr::maximum(max, scale);
+                    dr::store(scaled_data_ptr,
+                              dr::concat(coeff, dr::Array<ScalarFloat, 1>(scale)));
+                    ptr += 3;
+                    scaled_data_ptr += 4;
+                }
+                m_max = (float) max;
+
+                size_t shape[4] = {
+                    (size_t) res.z(),
+                    (size_t) res.y(),
+                    (size_t) res.x(),
+                    4
+                };
+                m_texture = Texture3f(TensorXf(scaled_data.get(), 4, shape),
+                                      m_accel, m_accel, filter_mode, wrap_mode);
+            } else if (volume_grid) {
+                size_t shape[4] = {
+                    (size_t) res.z(),
+                    (size_t) res.y(),
+                    (size_t) res.x(),
+                    channel_count
+                };
+                m_texture = Texture3f(TensorXf(volume_grid->data(), 4, shape),
+                                      m_accel, m_accel, filter_mode, wrap_mode);
+                m_max = volume_grid->max();
+                m_max_per_channel.resize(volume_grid->channel_count());
+                volume_grid->max_per_channel(m_max_per_channel.data());
+                m_channel_count = channel_count;
+            } else if (tensor) {
+                size_t shape[4] = {
+                    (size_t) res.z(),
+                    (size_t) res.y(),
+                    (size_t) res.x(),
+                    channel_count
+                };
+                m_texture = Texture3f(TensorXf(tensor->array(), 4, shape),
+                                      m_accel, m_accel, filter_mode, wrap_mode);
+                m_max = (float) dr::max_nested(dr::detach(m_texture.value()));
+                m_channel_count = channel_count;
+            }
         }
 
         if (props.get<bool>("use_grid_bbox", false)) {
+            if (tensor)
+                Throw("use_grid_bbox is unsupported with tensor input and requires a volume grid");
             m_to_local = volume_grid->bbox_transform() * m_to_local;
             update_bbox();
         }
@@ -261,9 +306,9 @@ public:
         }
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_parameter("data", m_texture.tensor(), +ParamFlags::Differentiable);
-        Base::traverse(callback);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("data", m_texture.tensor(), ParamFlags::Differentiable);
+        Base::traverse(cb);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -274,7 +319,7 @@ public:
                       "to have %d channels, only volumes with 1, 3 or 6 "
                       "channels are supported!", to_string(), channels);
 
-            m_texture.set_tensor(m_texture.tensor());
+            m_texture.update_inplace();
 
             if (!m_fixed_max)
                 m_max = (float) dr::max_nested(dr::detach(m_texture.value()));
@@ -406,7 +451,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(GridVolume)
 
 protected:
     /**
@@ -448,9 +493,9 @@ protected:
             fetch_values[7] = d111.data();
 
             if (m_accel)
-                m_texture.eval_fetch(p, fetch_values, active);
+                m_texture.template eval_fetch<Float>(p, fetch_values, active);
             else
-                m_texture.eval_fetch_nonaccel(p, fetch_values, active);
+                m_texture.template eval_fetch_nonaccel<Float>(p, fetch_values, active);
 
             UnpolarizedSpectrum v000, v001, v010, v011, v100, v101, v110, v111;
             v000 = srgb_model_eval<UnpolarizedSpectrum>(dr::head<3>(d000), it.wavelengths);
@@ -492,9 +537,9 @@ protected:
         } else {
             dr::Array<Float, 4> v;
             if (m_accel)
-                m_texture.eval(p, v.data(), active);
+                m_texture.template eval<Float>(p, v.data(), active);
             else
-                m_texture.eval_nonaccel(p, v.data(), active);
+                m_texture.template eval_nonaccel<Float>(p, v.data(), active);
 
             return v.w() * srgb_model_eval<UnpolarizedSpectrum>(dr::head<3>(v), it.wavelengths);
         }
@@ -511,9 +556,9 @@ protected:
         Point3f p = m_to_local * it.p;
         Float result;
         if (m_accel)
-            m_texture.eval(p, &result, active);
+            m_texture.template eval<Float>(p, &result, active);
         else
-            m_texture.eval_nonaccel(p, &result, active);
+            m_texture.template eval_nonaccel<Float>(p, &result, active);
 
         return result;
     }
@@ -530,9 +575,9 @@ protected:
         Point3f p = m_to_local * it.p;
         Color3f result;
         if (m_accel)
-            m_texture.eval(p, result.data(), active);
+            m_texture.template eval<Float>(p, result.data(), active);
         else
-            m_texture.eval_nonaccel(p, result.data(), active);
+            m_texture.template eval_nonaccel<Float>(p, result.data(), active);
 
         return result;
     }
@@ -549,9 +594,9 @@ protected:
         Point3f p = m_to_local * it.p;
         dr::Array<Float, 6> result;
         if (m_accel)
-            m_texture.eval(p, result.data(), active);
+            m_texture.template eval<Float>(p, result.data(), active);
         else
-            m_texture.eval_nonaccel(p, result.data(), active);
+            m_texture.template eval_nonaccel<Float>(p, result.data(), active);
 
         return result;
     }
@@ -568,9 +613,9 @@ protected:
 
         Point3f p = m_to_local * it.p;
         if (m_accel)
-            m_texture.eval(p, out, active);
+            m_texture.template eval<Float>(p, out, active);
         else
-            m_texture.eval_nonaccel(p, out, active);
+            m_texture.template eval_nonaccel<Float>(p, out, active);
     }
 
 protected:
@@ -580,9 +625,9 @@ protected:
     bool m_fixed_max = false;
     ScalarFloat m_max;
     std::vector<ScalarFloat> m_max_per_channel;
+
+    MI_TRAVERSE_CB(Base, m_texture)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(GridVolume, Volume)
-MI_EXPORT_PLUGIN(GridVolume, "GridVolume texture")
-
+MI_EXPORT_PLUGIN(GridVolume)
 NAMESPACE_END(mitsuba)

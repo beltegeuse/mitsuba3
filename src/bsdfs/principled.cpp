@@ -184,29 +184,30 @@ class Principled final : public BSDF<Float, Spectrum> {
 public:
     MI_IMPORT_BASE(BSDF, m_flags, m_components)
     MI_IMPORT_TYPES(Texture, MicrofacetDistribution)
+
     using GTR1 = GTR1Isotropic<Float, Spectrum>;
 
     Principled(const Properties &props) : Base(props) {
         // Parameter definitions
-        m_base_color = props.texture<Texture>("base_color", 0.5f);
-        m_roughness = props.texture<Texture>("roughness", 0.5f);
+        m_base_color = props.get_texture<Texture>("base_color", 0.5f);
+        m_roughness = props.get_texture<Texture>("roughness", 0.5f);
         m_has_anisotropic = get_flag("anisotropic", props);
-        m_anisotropic = props.texture<Texture>("anisotropic", 0.0f);
+        m_anisotropic = props.get_texture<Texture>("anisotropic", 0.0f);
         m_has_spec_trans = get_flag("spec_trans", props);
-        m_spec_trans = props.texture<Texture>("spec_trans", 0.0f);
+        m_spec_trans = props.get_texture<Texture>("spec_trans", 0.0f);
         m_has_sheen = get_flag("sheen", props);
-        m_sheen = props.texture<Texture>("sheen", 0.0f);
+        m_sheen = props.get_texture<Texture>("sheen", 0.0f);
         m_has_sheen_tint = get_flag("sheen_tint", props);
-        m_sheen_tint = props.texture<Texture>("sheen_tint", 0.0f);
+        m_sheen_tint = props.get_texture<Texture>("sheen_tint", 0.0f);
         m_has_flatness = get_flag("flatness", props);
-        m_flatness = props.texture<Texture>("flatness", 0.0f);
+        m_flatness = props.get_texture<Texture>("flatness", 0.0f);
         m_has_spec_tint = get_flag("spec_tint", props);
-        m_spec_tint = props.texture<Texture>("spec_tint", 0.0f);
+        m_spec_tint = props.get_texture<Texture>("spec_tint", 0.0f);
         m_has_metallic = get_flag("metallic", props);
-        m_metallic = props.texture<Texture>("metallic", 0.0f);
+        m_metallic = props.get_texture<Texture>("metallic", 0.0f);
         m_has_clearcoat = get_flag("clearcoat", props);
-        m_clearcoat = props.texture<Texture>("clearcoat", 0.0f);
-        m_clearcoat_gloss = props.texture<Texture>("clearcoat_gloss", 0.0f);
+        m_clearcoat = props.get_texture<Texture>("clearcoat", 0.0f);
+        m_clearcoat_gloss = props.get_texture<Texture>("clearcoat_gloss", 0.0f);
         m_spec_srate = props.get("main_specular_sampling_rate", 1.0f);
         m_clearcoat_srate = props.get("clearcoat_sampling_rate", 1.0f);
         m_diff_refl_srate = props.get("diffuse_reflectance_sampling_rate", 1.0f);
@@ -265,35 +266,33 @@ public:
 
         for (auto c : m_components)
             m_flags |= c;
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_object("clearcoat",       m_clearcoat.get(),       +ParamFlags::Differentiable);
-        callback->put_object("clearcoat_gloss", m_clearcoat_gloss.get(), +ParamFlags::Differentiable);
-        callback->put_object("metallic",        m_metallic.get(),        +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("clearcoat",       m_clearcoat,       ParamFlags::Differentiable);
+        cb->put("clearcoat_gloss", m_clearcoat_gloss, ParamFlags::Differentiable);
+        cb->put("metallic",        m_metallic,        ParamFlags::Differentiable);
 
-        callback->put_parameter("main_specular_sampling_rate",       m_spec_srate,      +ParamFlags::NonDifferentiable);
-        callback->put_parameter("clearcoat_sampling_rate",           m_clearcoat_srate, +ParamFlags::NonDifferentiable);
-        callback->put_parameter("diffuse_reflectance_sampling_rate", m_diff_refl_srate, +ParamFlags::NonDifferentiable);
+        cb->put("main_specular_sampling_rate",       m_spec_srate,      ParamFlags::NonDifferentiable);
+        cb->put("clearcoat_sampling_rate",           m_clearcoat_srate, ParamFlags::NonDifferentiable);
+        cb->put("diffuse_reflectance_sampling_rate", m_diff_refl_srate, ParamFlags::NonDifferentiable);
 
         if (m_eta_specular) //Only one of them traversed! (based on xml file)
-            callback->put_parameter("eta",      m_eta,      ParamFlags::Differentiable | ParamFlags::Discontinuous);
+            cb->put("eta",      m_eta,      ParamFlags::Differentiable | ParamFlags::Discontinuous);
         else
-            callback->put_parameter("specular", m_specular, ParamFlags::Differentiable | ParamFlags::Discontinuous);
+            cb->put("specular", m_specular, ParamFlags::Differentiable | ParamFlags::Discontinuous);
 
-        callback->put_object("roughness",       m_roughness.get(),   ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_object("base_color",      m_base_color.get(),  +ParamFlags::Differentiable);
-        callback->put_object("anisotropic",     m_anisotropic.get(), +ParamFlags::Differentiable);
-        callback->put_object("spec_tint",       m_spec_tint.get(),   +ParamFlags::Differentiable);
-        callback->put_object("sheen",           m_sheen.get(),       +ParamFlags::Differentiable);
-        callback->put_object("sheen_tint",      m_sheen_tint.get(),  +ParamFlags::Differentiable);
-        callback->put_object("spec_trans",      m_spec_trans.get(),  +ParamFlags::Differentiable);
-        callback->put_object("flatness",        m_flatness.get(),    +ParamFlags::Differentiable);
+        cb->put("roughness",   m_roughness,   ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        cb->put("base_color",  m_base_color,  ParamFlags::Differentiable);
+        cb->put("anisotropic", m_anisotropic, ParamFlags::Differentiable);
+        cb->put("spec_tint",   m_spec_tint,   ParamFlags::Differentiable);
+        cb->put("sheen",       m_sheen,       ParamFlags::Differentiable);
+        cb->put("sheen_tint",  m_sheen_tint,  ParamFlags::Differentiable);
+        cb->put("spec_trans",  m_spec_trans,  ParamFlags::Differentiable);
+        cb->put("flatness",    m_flatness,    ParamFlags::Differentiable);
     }
 
-    void
-    parameters_changed(const std::vector<std::string> &keys = {}) override {
+    void parameters_changed(const std::vector<std::string> &keys = {}) override {
         if (string::contains(keys, "spec_trans"))
             m_has_spec_trans = true;
         if (string::contains(keys, "clearcoat"))
@@ -339,7 +338,7 @@ public:
         BSDFSample3f bs   = dr::zeros<BSDFSample3f>();
 
         // Ignoring perfectly grazing incoming rays
-        active &= dr::neq(cos_theta_i, 0.0f);
+        active &= cos_theta_i != 0.0f;
 
         if (unlikely(dr::none_or<false>(active)))
             return { bs, 0.0f };
@@ -497,7 +496,7 @@ public:
 
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
         // Ignore perfectly grazing configurations
-        active &= dr::neq(cos_theta_i, 0.0f);
+        active &= cos_theta_i != 0.0f;
 
         if (unlikely(dr::none_or<false>(active)))
             return 0.0f;
@@ -607,7 +606,7 @@ public:
             /* Account for the solid angle compression when tracing
                radiance. This is necessary for bidirectional methods. */
             Float scale = (ctx.mode == TransportMode::Radiance)
-                    ? dr::sqr(inv_eta_path)
+                    ? dr::square(inv_eta_path)
                     : Float(1.0f);
 
             // Adding the specular transmission component
@@ -615,7 +614,7 @@ public:
                     dr::sqrt(base_color) * bsdf *
                     dr::abs((scale * (1.0f - F_spec_dielectric) * D * G * eta_path *
                     eta_path * dr::dot(si.wi, wh) * dr::dot(wo, wh)) /
-                    (cos_theta_i * dr::sqr(dr::dot(si.wi, wh) +
+                    (cos_theta_i * dr::square(dr::dot(si.wi, wh) +
                     eta_path * dr::dot(wo, wh))));
         }
 
@@ -650,7 +649,7 @@ public:
             Float f_diff = (1.0f - 0.5f * Fi) * (1.0f - 0.5f * Fo);
 
             Float cos_theta_d = dr::dot(wh, wo);
-            Float Rr          = 2.0f * roughness * dr::sqr(cos_theta_d);
+            Float Rr          = 2.0f * roughness * dr::square(cos_theta_d);
 
             // Retro reflection
             Float f_retro = Rr * (Fo + Fi + Fo * Fi * (Rr - 1.0f));
@@ -715,7 +714,7 @@ public:
 
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
         // Ignore perfectly grazing configurations.
-        active &= dr::neq(cos_theta_i, 0.0f);
+        active &= cos_theta_i != 0.0f;
 
         if (unlikely(dr::none_or<false>(active)))
             return 0.0f;
@@ -794,8 +793,8 @@ public:
             Float dot_wo_h = dr::dot(wo, wh);
             dwh_dwo_abs    = dr::abs(
                     dr::select(reflect, dr::rcp(4.0f * dot_wo_h),
-                               (dr::sqr(eta_path) * dot_wo_h) /
-                               dr::sqr(dot_wi_h + eta_path * dot_wo_h)));
+                               (dr::square(eta_path) * dot_wo_h) /
+                               dr::square(dot_wi_h + eta_path * dot_wo_h)));
         } else {
             dwh_dwo_abs = dr::abs(dr::rcp(4.0f * dr::dot(wo, wh)));
         }
@@ -863,7 +862,7 @@ public:
 
         return oss.str();
     }
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(Principled)
 private:
     /// Parameters
     ref<Texture> m_base_color;
@@ -895,8 +894,12 @@ private:
     bool m_has_sheen_tint;
     bool m_has_anisotropic;
     bool m_has_flatness;
+
+    MI_TRAVERSE_CB(Base, m_base_color, m_roughness, m_anisotropic, m_sheen,
+                   m_sheen_tint, m_spec_trans, m_flatness, m_spec_tint,
+                   m_clearcoat, m_clearcoat_gloss, m_metallic, m_eta,
+                   m_specular)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(Principled, BSDF)
-MI_EXPORT_PLUGIN(Principled, "The Principled Material")
+MI_EXPORT_PLUGIN(Principled)
 NAMESPACE_END(mitsuba)

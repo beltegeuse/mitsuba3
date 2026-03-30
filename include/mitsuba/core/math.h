@@ -20,6 +20,7 @@ template <typename T> constexpr auto RayEpsilon = dr::Epsilon<dr::float32_array_
 template <typename T> constexpr auto RayEpsilon = dr::Epsilon<T> * 1500;
 #endif
 template <typename T> constexpr auto ShadowEpsilon = RayEpsilon<T> * 10;
+template <typename T> constexpr auto ShapeEpsilon = RayEpsilon<T> / 80;
 
 //! @}
 // -----------------------------------------------------------------------
@@ -195,7 +196,7 @@ template <typename T> T round_to_power_of_two(T i) {
 /// Ceiling of base-2 logarithm
 template <typename T> T log2i_ceil(T value) {
     T result = 8 * sizeof(dr::scalar_t<T>) - 1u - dr::lzcnt(value);
-    dr::masked(result, dr::neq(value & (value - 1u), 0u)) += 1u;
+    dr::masked(result, (value & (value - 1u)) != 0u) += 1u;
     return result;
 }
 
@@ -237,11 +238,11 @@ MI_INLINE Index find_interval(dr::scalar_t<Index> size,
 
 /**
  * \brief This function computes a suitable middle point for use in the \ref bisect() function
- * 
+ *
  * To mitigate the issue of varying density of floating point numbers on the
  * number line, the floats are reinterpreted as unsigned integers. As long as
  * sign of both numbers is the same, this maps the floats to the evenly spaced
- * set of integers. The middle of these integers ensures that the space of 
+ * set of integers. The middle of these integers ensures that the space of
  * numbers is halved on each iteration of the bisection.
  *
  * Note that this strategy does not work if the numbers have different sign.
@@ -361,10 +362,10 @@ solve_quadratic(const Value &a, const Value &b, const Value &c) {
     using Mask = dr::mask_t<Value>;
 
     /* Is this perhaps a linear equation? */
-    Mask linear_case = dr::eq(a, Scalar(0));
+    Mask linear_case = a == Scalar(0);
 
     /* If so, we require b != 0 */
-    Mask valid_linear = linear_case && dr::neq(b, Scalar(0));
+    Mask valid_linear = linear_case && (b != Scalar(0));
 
     /* Initialize solution with that of linear equation */
     Value x0, x1;

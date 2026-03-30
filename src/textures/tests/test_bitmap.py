@@ -31,7 +31,6 @@ def test01_sample_position(variants_vec_backends_once, filter_type, wrap_mode):
 @fresolver_append_path
 def test02_eval_grad(variant_scalar_rgb, np_rng):
     # Tests evaluating the texture gradient under different rotation
-    import numpy as np
     delta = 1e-4
     si = mi.SurfaceInteraction3f()
     for u01 in np_rng.random((10, 1)):
@@ -39,7 +38,7 @@ def test02_eval_grad(variant_scalar_rgb, np_rng):
         bitmap = mi.load_dict({
             "type" : "bitmap",
             "filename" : "resources/data/common/textures/noise_8x8.png",
-            "to_uv" : mi.ScalarTransform4f.rotate([0, 0, 1], angle)
+            "to_uv" : mi.ScalarTransform4f().rotate([0, 0, 1], angle)
         })
         for uv in np_rng.random((10, 2)):
             si.uv = mi.Vector2f(uv)
@@ -56,12 +55,11 @@ def test02_eval_grad(variant_scalar_rgb, np_rng):
 @fresolver_append_path
 @pytest.mark.parametrize('wrap_mode', ['repeat', 'clamp', 'mirror'])
 def test03_wrap(variants_vec_backends_once_rgb, wrap_mode):
-    import numpy as np
-
     bitmap = mi.load_dict({
-        "type" : "bitmap",
-        "filename" : "resources/data/common/textures/noise_8x8.png",
-        "wrap_mode" : wrap_mode
+        "type"      : "bitmap",
+        "filename"  : "resources/data/common/textures/noise_8x8.png",
+        "wrap_mode" : wrap_mode,
+        "format"    : "variant"
     })
 
     def eval_ranges(range_x, range_y):
@@ -91,49 +89,47 @@ def test03_wrap(variants_vec_backends_once_rgb, wrap_mode):
 
     elif wrap_mode == 'clamp':
         # Top
-        x = dr.linspace(mi.Float, 0, 1, axis_res)
-        y = dr.linspace(mi.Float, -1, 0, axis_res)
-        top = np.array(ref)[:axis_res]
-        assert dr.allclose(0, top - np.reshape(
-            eval_ranges(x, y), (axis_res, axis_res, 3)), atol=1e-04)
+        x           = dr.linspace(mi.Float, 0, 1, axis_res)
+        y           = dr.linspace(mi.Float, -1, 0, axis_res)
+        y_expected  = dr.linspace(mi.Float, 0, 0, axis_res)
+        assert dr.allclose(eval_ranges(x, y_expected), eval_ranges(x,y),
+            atol=1e-04)
 
         # Bottom
-        x = dr.linspace(mi.Float, 0, 1, axis_res)
-        y = dr.linspace(mi.Float, 1, 2, axis_res)
-        bottom = np.array(ref)[-axis_res:]
-        assert dr.allclose(0, bottom - np.reshape(
-            eval_ranges(x, y), (axis_res, axis_res, 3)), atol=1e-04)
+        x           = dr.linspace(mi.Float, 0, 1, axis_res)
+        y           = dr.linspace(mi.Float, 1, 2, axis_res)
+        y_expected  = dr.linspace(mi.Float, 1, 1, axis_res)
+        assert dr.allclose(eval_ranges(x, y_expected), eval_ranges(x,y),
+            atol=1e-04)
 
         # Left
-        x = dr.linspace(mi.Float, -1, 0, axis_res)
-        y = dr.linspace(mi.Float, 0, 1, axis_res)
-        left = np.array(ref)[::axis_res]
-        assert dr.allclose(0, np.repeat(left, axis_res, axis=0) -
-            eval_ranges(x, y), atol=1e-04)
+        x           = dr.linspace(mi.Float, -1, 0, axis_res)
+        y           = dr.linspace(mi.Float, 0, 1, axis_res)
+        x_expected  = dr.linspace(mi.Float, 0, 0, axis_res)
+        assert dr.allclose(eval_ranges(x_expected, y), eval_ranges(x,y),
+            atol=1e-04)
 
         # Right
-        x = dr.linspace(mi.Float, 1, 2, axis_res)
-        y = dr.linspace(mi.Float, 0, 1, axis_res)
-        right = np.array(ref)[axis_res - 1::axis_res]
-        assert dr.allclose(0, np.repeat(right, axis_res, axis=0) -
-            eval_ranges(x, y), atol=1e-04)
+        x           = dr.linspace(mi.Float, 1, 2, axis_res)
+        y           = dr.linspace(mi.Float, 0, 1, axis_res)
+        x_expected  = dr.linspace(mi.Float, 1, 1, axis_res)
+        assert dr.allclose(eval_ranges(x_expected, y), eval_ranges(x,y),
+            atol=1e-04)
 
     elif wrap_mode == 'mirror':
         # Top left
-        x = dr.linspace(mi.Float, -1, 0, axis_res)[::-1]
-        y = dr.linspace(mi.Float, -1, 0, axis_res)[::-1]
+        x = dr.linspace(mi.Float, 0, -1, axis_res)
+        y = dr.linspace(mi.Float, 0, -1, axis_res)
         assert dr.allclose(0, ref - eval_ranges(x, y), atol=1e-04)
 
         # Bottom right
-        x = dr.linspace(mi.Float, 1, 2, axis_res)[::-1]
-        y = dr.linspace(mi.Float, 1, 2, axis_res)[::-1]
+        x = dr.linspace(mi.Float, 2, 1, axis_res)
+        y = dr.linspace(mi.Float, 2, 1, axis_res)
         assert dr.allclose(0, ref - eval_ranges(x, y), atol=1e-04)
 
 
 @fresolver_append_path
 def test04_eval_rgb(variants_vec_backends_once_rgb):
-    import numpy as np
-
     # RGB image
     bitmap = mi.load_dict({
         'type' : 'bitmap',
@@ -160,10 +156,11 @@ def test04_eval_rgb(variants_vec_backends_once_rgb):
     # Grayscale image
     bitmap = mi.load_dict({
         'type' : 'bitmap',
-        'filename' : 'resources/data/common/textures/noise_02.png'
+        'filename' : 'resources/data/common/textures/noise_02.png',
+        'format' : 'variant'
     })
 
-    x_res, y_res =  bitmap.resolution()
+    x_res, y_res = bitmap.resolution()
     # Coordinates of gray pixel: (0, 15)
     x = (1 / x_res) * 0 + (1 / (2 * x_res))
     y = (1 / y_res) * 15 + (1 / (2 * y_res))
@@ -176,7 +173,7 @@ def test04_eval_rgb(variants_vec_backends_once_rgb):
         color = bitmap.eval_3(si)
     spec = bitmap.eval(si)
 
-    expected = 0.5394
+    expected = 0.5395
     assert dr.allclose(expected, spec, atol=1e-04)
     assert dr.allclose(expected, mono, atol=1e-04)
 
@@ -230,3 +227,55 @@ def test05_eval_spectral(variants_vec_backends_once_spectral):
     expected = 0.5394
     assert dr.allclose(expected, spec, atol=1e-04)
     assert dr.allclose(expected, mono, atol=1e-04)
+
+
+def test06_tensor_load(variants_all_rgb):
+    bitmap = mi.load_dict({
+        'type' : 'bitmap',
+        'data' : dr.ones(mi.TensorXf, shape = [30, 30, 3]),
+        'raw' : True
+    })
+
+    assert dr.allclose(bitmap.mean(), 1.0);
+
+    bitmap = mi.load_dict({
+        'type' : 'bitmap',
+        'data' : dr.full(mi.TensorXf, 3.0, shape = [30, 30, 3]),
+        'raw' : True
+    })
+
+    assert dr.allclose(bitmap.mean(), 3.0);
+
+
+@fresolver_append_path
+@pytest.mark.parametrize('filter_type', ['nearest', 'bilinear'])
+@pytest.mark.parametrize('wrap_mode', ['repeat', 'clamp', 'mirror'])
+def test07_sample_position_consistency(variants_vec_backends_once, filter_type, wrap_mode):
+    bitmap = mi.load_dict({
+        "type" : "bitmap",
+        "filename" : "resources/data/common/textures/carrot.png",
+        "filter_type" : filter_type,
+        "wrap_mode" : wrap_mode
+    })
+
+    N = 10000
+    x = dr.linspace(mi.Float, 0, 1, N)
+    x, y = dr.meshgrid(x, x)
+    out = bitmap.sample_position(mi.Point2f(x, y))
+    pdf = bitmap.pdf_position(mi.Point2f(out[0]))
+
+    assert dr.allclose(out[1], pdf)
+
+
+@fresolver_append_path
+def test08_to_uv(variant_scalar_rgb):
+    transform = mi.ScalarTransform3f().translate([2,4]).scale([3, 9]).rotate(45)
+
+    bitmap = mi.load_dict({
+        "type" : "bitmap",
+        "filename" : "resources/data/common/textures/noise_8x8.png",
+        "to_uv" : transform
+    })
+
+    params = mi.traverse(bitmap)
+    assert params["to_uv"] == transform

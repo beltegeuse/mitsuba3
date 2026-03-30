@@ -27,9 +27,8 @@ SGGX phase function (:monosp:`sggx`)
 This plugin implements the SGGX phase function :cite:`Heitz2015SGGX`.
 The SGGX phase function is an anisotropic microflake phase function :cite:`Jakob10`.
 This phase function can be useful to model fibers or surface-like structures using volume rendering.
-The SGGX microflake distribution is parametrized by a symmetric, positive definite matrix :math:`S`.
-This positive definite matrix describes the geometry of a 3D ellipsoid.
-The microflake normals of the SGGX phase function correspond to normals of this ellipsoid.
+The SGGX distribution is the distribution of normals (NDF) of a 3D ellipsoid.
+It is parametrized by a symmetric, positive definite matrix :math:`S`.
 
 Due to it's symmetry, the matrix :math:`S` is fully specified by providing the entries
 :math:`S_{xx}`, :math:`S_{yy}`, :math:`S_{zz}`, :math:`S_{xy}`, :math:`S_{xz}` and :math:`S_{yz}`.
@@ -46,7 +45,7 @@ It is the responsibility of the user to ensure that these parameters describe a 
 
     .. code-tab:: python
 
-        'type': 'rayleigh',
+        'type': 'sggx',
         'S': {
             'type': 'gridvolume',
             'filename': 'volume.vol'
@@ -62,14 +61,13 @@ public:
 
     SGGXPhaseFunction(const Properties &props) : Base(props) {
         // m_diffuse    = props.get<bool>("diffuse", false);
-        m_ndf_params = props.volume<Volume>("S");
+        m_ndf_params = props.get<ref<Volume>>("S");
         m_flags =
             PhaseFunctionFlags::Anisotropic | PhaseFunctionFlags::Microflake;
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_parameter("S", m_ndf_params, +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("S", m_ndf_params, ParamFlags::Differentiable);
     }
 
     MI_INLINE
@@ -137,12 +135,11 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(SGGXPhaseFunction)
 private:
     // bool m_diffuse;
     ref<Volume> m_ndf_params;
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(SGGXPhaseFunction, PhaseFunction)
-MI_EXPORT_PLUGIN(SGGXPhaseFunction, "SGGX phase function")
+MI_EXPORT_PLUGIN(SGGXPhaseFunction)
 NAMESPACE_END(mitsuba)

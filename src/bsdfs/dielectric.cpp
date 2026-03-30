@@ -70,7 +70,7 @@ This snippet describes a simple air-to-water interface
                 <string name="int_ior" value="water"/>
                 <string name="ext_ior" value="air"/>
             </bsdf>
-        <shape>
+        </shape>
 
     .. code-tab:: python
 
@@ -103,7 +103,7 @@ An example of how one might describe a slightly absorbing piece of glass is show
                 <rgb name="sigma_t" value="1, 1, 0.5"/>
                 <rgb name="albedo" value="0.0, 0.0, 0.0"/>
             </medium>
-        <shape>
+        </shape>
 
     .. code-tab:: python
 
@@ -222,9 +222,9 @@ public:
         m_eta = int_ior / ext_ior;
 
         if (props.has_property("specular_reflectance"))
-            m_specular_reflectance   = props.texture<Texture>("specular_reflectance", 1.f);
+            m_specular_reflectance   = props.get_texture<Texture>("specular_reflectance", 1.f);
         if (props.has_property("specular_transmittance"))
-            m_specular_transmittance = props.texture<Texture>("specular_transmittance", 1.f);
+            m_specular_transmittance = props.get_texture<Texture>("specular_transmittance", 1.f);
 
         m_components.push_back(BSDFFlags::DeltaReflection | BSDFFlags::FrontSide |
                                BSDFFlags::BackSide);
@@ -232,15 +232,14 @@ public:
                                BSDFFlags::BackSide | BSDFFlags::NonSymmetric);
 
         m_flags = m_components[0] | m_components[1];
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_parameter("eta", m_eta, +ParamFlags::NonDifferentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("eta", m_eta, ParamFlags::NonDifferentiable);
         if (m_specular_reflectance)
-            callback->put_object("specular_reflectance",   m_specular_reflectance.get(),   +ParamFlags::Differentiable);
+            cb->put("specular_reflectance", m_specular_reflectance, ParamFlags::Differentiable);
         if (m_specular_transmittance)
-            callback->put_object("specular_transmittance", m_specular_transmittance.get(), +ParamFlags::Differentiable);
+            cb->put("specular_transmittance", m_specular_transmittance, ParamFlags::Differentiable);
     }
 
     std::pair<BSDFSample3f, Spectrum> sample(const BSDFContext &ctx,
@@ -315,8 +314,15 @@ public:
             /* The Stokes reference frame vector of this matrix lies perpendicular
                to the plane of reflection. */
             Vector3f n(0, 0, 1);
-            Vector3f s_axis_in  = dr::normalize(dr::cross(n, -wo_hat)),
-                     s_axis_out = dr::normalize(dr::cross(n, wi_hat));
+            Vector3f s_axis_in  = dr::cross(n, -wo_hat);
+            Vector3f s_axis_out = dr::cross(n, wi_hat);
+
+            // Singularity when the input & output are collinear with the normal
+            Mask collinear = dr::all(s_axis_in == Vector3f(0));
+            s_axis_in  = dr::select(collinear, Vector3f(1, 0, 0),
+                                               dr::normalize(s_axis_in));
+            s_axis_out = dr::select(collinear, Vector3f(1, 0, 0),
+                                               dr::normalize(s_axis_out));
 
             /* Rotate in/out reference vector of `weight` s.t. it aligns with the
                implicit Stokes bases of -wo_hat & wi_hat. */
@@ -337,7 +343,9 @@ public:
                     Sampling weights should be computed accordingly. */
                 if constexpr (dr::is_diff_v<Float>) {
                     if (dr::grad_enabled(r_i)) {
-                        weight = dr::select(selected_r, r_i / dr::detach(r_i), t_i / dr::detach(t_i));
+                        Float r_diff = dr::replace_grad(Float(1.f), r_i / dr::detach(r_i));
+                        Float t_diff = dr::replace_grad(Float(1.f), t_i / dr::detach(t_i));
+                        weight = dr::select(selected_r, r_diff, t_diff);
                     }
                 }
             } else if (has_reflection || has_transmission) {
@@ -355,7 +363,7 @@ public:
             /* For transmission, radiance must be scaled to account for the solid
                angle compression that occurs when crossing the interface. */
             Float factor = (ctx.mode == TransportMode::Radiance) ? eta_ti : Float(1.f);
-            weight[selected_t] *= dr::sqr(factor);
+            weight[selected_t] *= dr::square(factor);
         }
 
         return { bs, weight & active };
@@ -383,13 +391,14 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(SmoothDielectric)
 private:
     ScalarFloat m_eta;
     ref<Texture> m_specular_reflectance;
     ref<Texture> m_specular_transmittance;
+
+    MI_TRAVERSE_CB(Base, m_eta, m_specular_reflectance,m_specular_transmittance)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(SmoothDielectric, BSDF)
-MI_EXPORT_PLUGIN(SmoothDielectric, "Smooth dielectric")
+MI_EXPORT_PLUGIN(SmoothDielectric)
 NAMESPACE_END(mitsuba)

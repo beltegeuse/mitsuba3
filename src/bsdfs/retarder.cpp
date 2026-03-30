@@ -73,20 +73,19 @@ public:
     MI_IMPORT_TYPES(Texture)
 
     LinearRetarder(const Properties &props) : Base(props) {
-        m_theta = props.texture<Texture>("theta", 0.f);
+        m_theta = props.get_unbounded_texture<Texture>("theta", 0.f);
         // As default, instantiate as a quarter-wave plate
-        m_delta = props.texture<Texture>("delta", 90.f);
-        m_transmittance = props.texture<Texture>("transmittance", 1.f);
+        m_delta = props.get_unbounded_texture<Texture>("delta", 90.f);
+        m_transmittance = props.get_texture<Texture>("transmittance", 1.f);
 
         m_flags = BSDFFlags::FrontSide | BSDFFlags::BackSide | BSDFFlags::Null;
-        dr::set_attr(this, "flags", m_flags);
         m_components.push_back(m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_object("theta",         m_theta.get(),         +ParamFlags::Differentiable);
-        callback->put_object("delta",         m_delta.get(),         +ParamFlags::Differentiable);
-        callback->put_object("transmittance", m_transmittance.get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("theta",         m_theta,         ParamFlags::Differentiable);
+        cb->put("delta",         m_delta,         ParamFlags::Differentiable);
+        cb->put("transmittance", m_transmittance, ParamFlags::Differentiable);
     }
 
     std::pair<BSDFSample3f, Spectrum> sample(const BSDFContext &ctx, const SurfaceInteraction3f &si,
@@ -111,13 +110,15 @@ public:
             UnpolarizedSpectrum delta = dr::deg_to_rad(m_delta->eval(si, active));
 
             // Approximate angle-of-incidence behaviour with a cosine falloff
-            delta *= dr::abs(Frame3f::cos_theta(si.wi));
+            Float cos_theta = Frame3f::cos_theta(si.wi);
+            delta *= dr::abs(cos_theta);
 
             // Get standard Mueller matrix for a linear polarizer.
             Spectrum M = mueller::linear_retarder(delta);
 
-            // Rotate optical element by specified angle
-            M = mueller::rotated_element(theta, M);
+            /* Rotate optical element by specified angle. The angle is flipped if
+               the element is intersected from the backside. */
+            M = mueller::rotated_element(dr::sign(cos_theta) * theta, M);
 
             /* The `forward` direction here is always along the direction that
                light travels. This is needed for the coordinate system rotation
@@ -161,13 +162,15 @@ public:
             UnpolarizedSpectrum delta = dr::deg_to_rad(m_delta->eval(si, active));
 
             // Approximate angle-of-incidence behaviour with a cosine falloff
-            delta *= dr::abs(Frame3f::cos_theta(si.wi));
+            Float cos_theta = Frame3f::cos_theta(si.wi);
+            delta *= dr::abs(cos_theta);
 
             // Get standard Mueller matrix for a linear polarizer.
             Spectrum M = mueller::linear_retarder(delta);
 
-            // Rotate optical element by specified angle
-            M = mueller::rotated_element(theta, M);
+            /* Rotate optical element by specified angle. The angle is flipped if
+               the element is intersected from the backside. */
+            M = mueller::rotated_element(dr::sign(cos_theta) * theta, M);
 
             /* The `forward` direction here is always along the direction that
                light travels. This is needed for the coordinate system rotation
@@ -190,7 +193,7 @@ public:
 
     std::string to_string() const override {
         std::ostringstream oss;
-        oss << "LinearPolarizer[" << std::endl
+        oss << "LinearRetarder[" << std::endl
             << "  theta = " << string::indent(m_theta) << std::endl
             << "  delta = " << string::indent(m_delta) << std::endl
             << "  transmittance = " << string::indent(m_transmittance) << std::endl
@@ -198,13 +201,14 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(LinearRetarder)
 private:
     ref<Texture> m_theta;
     ref<Texture> m_delta;
     ref<Texture> m_transmittance;
+
+    MI_TRAVERSE_CB(Base, m_theta, m_delta, m_transmittance)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(LinearRetarder, BSDF)
-MI_EXPORT_PLUGIN(LinearRetarder, "Linear retarder material")
+MI_EXPORT_PLUGIN(LinearRetarder)
 NAMESPACE_END(mitsuba)

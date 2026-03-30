@@ -13,6 +13,7 @@
 #include <mitsuba/core/util.h>
 #include <drjit/dynamic.h>
 #include <array>
+#include <drjit/traversable_base.h>
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -47,7 +48,7 @@ NAMESPACE_BEGIN(mitsuba)
  * play an important role in certain applications. In particular:
  *
  * \c Hierarchical2D generates samples using hierarchical sample warping, which
- * is essentially a course-to-fine traversal of a MIP map. It generates a
+ * is essentially a coarse-to-fine traversal of a MIP map. It generates a
  * mapping with very little shear/distortion, but it has numerous
  * discontinuities that can be problematic for some applications.
  *
@@ -72,7 +73,7 @@ NAMESPACE_BEGIN(mitsuba)
  */
 
 template <typename Float_, size_t Dimension_ = 0>
-class DiscreteDistribution2D {
+class DiscreteDistribution2D : drjit::TraversableBase {
 public:
     using Float                       = Float_;
     using UInt32                      = dr::uint32_array_t<Float>;
@@ -143,7 +144,7 @@ public:
         Point2f sample(sample_);
 
         // Avoid degeneracies on the domain boundary
-        sample = dr::clamp(sample, dr::Smallest<Float>, dr::OneMinusEpsilon<Float>);
+        sample = dr::clip(sample, dr::Smallest<Float>, dr::OneMinusEpsilon<Float>);
 
         // Scale sample Y range
         sample.y() *= m_inv_normalization;
@@ -173,8 +174,8 @@ public:
 
         sample.x() -= col_cdf_0;
         sample.y() -= row_cdf_0;
-        dr::masked(sample.x(), dr::neq(col_cdf_1, col_cdf_0)) /= col_cdf_1 - col_cdf_0;
-        dr::masked(sample.y(), dr::neq(row_cdf_1, row_cdf_0)) /= row_cdf_1 - row_cdf_0;
+        dr::masked(sample.x(), col_cdf_1 != col_cdf_0) /= col_cdf_1 - col_cdf_0;
+        dr::masked(sample.y(), row_cdf_1 != row_cdf_0) /= row_cdf_1 - row_cdf_0;
 
         return { Point2u(col, row), (col_cdf_1 - col_cdf_0) * m_normalization, sample };
     }
@@ -201,10 +202,14 @@ protected:
 
     Float m_inv_normalization;
     Float m_normalization;
+
+    MI_TRAVERSE_CB(drjit::TraversableBase, m_data, m_marg_cdf, m_cond_cdf,
+                   m_inv_normalization, m_normalization)
 };
 
 /// Base class of Hierarchical2D and Marginal2D with common functionality
-template <typename Float_, size_t Dimension_ = 0> class Distribution2D {
+template <typename Float_, size_t Dimension_ = 0>
+class Distribution2D : drjit::TraversableBase {
 public:
     static constexpr size_t Dimension = Dimension_;
     using Float                       = Float_;
@@ -273,7 +278,7 @@ protected:
                       p1 = dr::gather<Float>(m_param_values[dim], param_index + 1, active);
 
                 param_weight[2 * dim + 1] =
-                    dr::clamp((param[dim] - p0) / (p1 - p0), 0.f, 1.f);
+                    dr::clip((param[dim] - p0) / (p1 - p0), 0.f, 1.f);
                 param_weight[2 * dim] = 1.f - param_weight[2 * dim + 1];
                 slice_offset += m_param_strides[dim] * param_index;
             }
@@ -308,6 +313,28 @@ protected:
 
     /// Total number of slices (in case Dimension > 1)
     uint32_t m_slices;
+
+public:
+    void
+    traverse_1_cb_ro(void *payload,
+                     drjit::detail::traverse_callback_ro fn) const override {
+        if constexpr (!std ::is_same_v<drjit ::TraversableBase,
+                                       drjit ::TraversableBase>)
+            drjit ::TraversableBase ::traverse_1_cb_ro(payload, fn);
+        for (const auto &param_value : m_param_values) {
+            drjit ::traverse_1_fn_ro(param_value, payload, fn);
+        }
+    }
+    void traverse_1_cb_rw(void *payload,
+                          drjit::detail::traverse_callback_rw fn) override {
+        if constexpr (!std ::is_same_v<drjit ::TraversableBase,
+                                       drjit ::TraversableBase>)
+            drjit ::TraversableBase ::traverse_1_cb_rw(payload, fn);
+
+        for (auto &param_value : m_param_values) {
+            drjit ::traverse_1_fn_rw(param_value, payload, fn);
+        }
+    }
 };
 
 /**
@@ -497,7 +524,7 @@ public:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid issues with roundoff error
-        sample = dr::clamp(sample, 0.f, 1.f);
+        sample = dr::clip(sample, 0.f, 1.f);
 
         // Hierarchical sample warping
         Point2u offset = dr::zeros<Point2u>();
@@ -525,7 +552,7 @@ public:
                                      param_weight, active);
 
             // Avoid issues with roundoff error
-            sample = dr::clamp(sample, 0.f, 1.f);
+            sample = dr::clip(sample, 0.f, 1.f);
 
             // Select the row
             Float r0 = v00 + v10,
@@ -586,7 +613,7 @@ public:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid issues with roundoff error
-        sample = dr::clamp(sample, 0.f, 1.f);
+        sample = dr::clip(sample, 0.f, 1.f);
 
         // Fetch values at corners of bilinear patch
         const Level &level0 = m_levels[0];
@@ -636,8 +663,8 @@ public:
             v11 = level.lookup(offset_i, m_param_strides,
                                param_weight, active);
 
-            Mask x_mask = dr::neq(offset.x() & 1u, 0u),
-                 y_mask = dr::neq(offset.y() & 1u, 0u);
+            Mask x_mask = offset.x() & (1u != 0u),
+                 y_mask = offset.y() & (1u != 0u);
 
             Float r0 = v00 + v10,
                   r1 = v01 + v11,
@@ -653,7 +680,7 @@ public:
             sample.x() /= c0 + c1;
 
             // Avoid issues with roundoff error
-            sample = dr::clamp(sample, 0.f, 1.f);
+            sample = dr::clip(sample, 0.f, 1.f);
 
             offset = dr::sr<1>(offset);
         }
@@ -672,7 +699,7 @@ public:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid issues with roundoff error
-        pos = dr::clamp(pos, 0.f, 1.f);
+        pos = dr::clip(pos, 0.f, 1.f);
 
         // Compute linear interpolation weights
         pos *= m_inv_patch_size;
@@ -760,7 +787,7 @@ protected:
          * \brief Convert from 2D pixel coordinates to an index indicating how the
          * data is laid out in memory.
          *
-         * The implementation stores 2x2 patches contigously in memory to
+         * The implementation stores 2x2 patches contiguously in memory to
          * improve cache locality during hierarchical traversals
          */
         template <typename Point2u>
@@ -788,6 +815,8 @@ protected:
                 return dr::gather<Float>(data, i0, active);
             }
         }
+
+        DRJIT_STRUCT_NODEF(Level, data)
     };
 
     /// MIP hierarchy over linearly interpolated patches
@@ -795,6 +824,8 @@ protected:
 
     /// Number of bilinear patches in the X/Y dimension - 1
     ScalarVector2u m_max_patch_index;
+
+    MI_TRAVERSE_CB(Base, m_levels)
 };
 
 /**
@@ -1030,7 +1061,7 @@ public:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid issues with roundoff error
-        pos = dr::clamp(pos, 0.f, 1.f);
+        pos = dr::clip(pos, 0.f, 1.f);
 
         // Compute linear interpolation weights
         pos *= m_inv_patch_size;
@@ -1086,11 +1117,11 @@ public:
 protected:
     template <size_t Dim = Dimension>
     MI_INLINE Float lookup(const FloatStorage &data,
-                            size_t offset,
-                            UInt32 i0,
-                            uint32_t size,
-                            const Float *param_weight,
-                            Mask active) const {
+                           uint32_t offset,
+                           UInt32 i0,
+                           uint32_t size,
+                           const Float *param_weight,
+                           Mask active) const {
         if constexpr (Dim != 0) {
             UInt32 i1 = i0 + m_param_strides[Dim - 1] * size;
 
@@ -1123,7 +1154,7 @@ protected:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid degeneracies on the domain boundary
-        sample = dr::clamp(sample, dr::Epsilon<Float>, dr::OneMinusEpsilon<Float>);
+        sample = dr::clip(sample, dr::Epsilon<Float>, dr::OneMinusEpsilon<Float>);
 
         /// Multiply by last entry of marginal CDF if the data is not normalized
         UInt32 offset_marg = slice_offset * n_marg;
@@ -1148,7 +1179,7 @@ protected:
               row_cdf_1 = fetch_marginal(row, active);
 
         sample.y() -= row_cdf_0;
-        dr::masked(sample.y(), dr::neq(row_cdf_1, row_cdf_0)) /= row_cdf_1 - row_cdf_0;
+        dr::masked(sample.y(), row_cdf_1 != row_cdf_0) /= row_cdf_1 - row_cdf_0;
 
         /// Multiply by last entry of conditional CDF
         UInt32 offset_cond = slice_offset * n_cond + row * (m_size.x() - 1);
@@ -1171,7 +1202,7 @@ protected:
                                  n_cond, param_weight, active);
 
         sample.x() -= col_cdf_0;
-        dr::masked(sample.x(), dr::neq(col_cdf_1, col_cdf_0)) /= col_cdf_1 - col_cdf_0;
+        dr::masked(sample.x(), col_cdf_1 != col_cdf_0) /= col_cdf_1 - col_cdf_0;
 
         // Sample a position on the bilinear patch
         UInt32 offset_data = slice_offset * n_data + row * m_size.x() + col;
@@ -1207,7 +1238,7 @@ protected:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid issues with roundoff error
-        sample = dr::clamp(sample, 0.f, 1.f);
+        sample = dr::clip(sample, 0.f, 1.f);
 
         // Fetch values at corners of bilinear patch
         sample *= m_inv_patch_size;
@@ -1270,7 +1301,7 @@ protected:
         DRJIT_MARK_USED(slice_offset);
 
         // Avoid degeneracies on the domain boundary
-        sample = dr::clamp(sample, dr::Epsilon<Float>,
+        sample = dr::clip(sample, dr::Epsilon<Float>,
                        dr::OneMinusEpsilon<Float>);
 
         // Sample the row first
@@ -1364,7 +1395,7 @@ protected:
         UInt32 slice_offset = interpolate_weights(param, param_weight, active);
 
         // Avoid issues with roundoff error
-        sample = dr::clamp(sample, 0.f, 1.f);
+        sample = dr::clip(sample, 0.f, 1.f);
 
         // Fetch values at corners of bilinear patch
         sample *= m_inv_patch_size;
@@ -1432,8 +1463,8 @@ protected:
         Float divisor = dr::select(non_const, v0 - v1, v0 + v1);
         sample *= 2.f * inv_width;
         dr::masked(sample, non_const) =
-            v0 - dr::safe_sqrt(dr::sqr(v0) + sample * (v1 - v0));
-        dr::masked(sample, dr::neq(divisor, 0.f)) /= divisor;
+            v0 - dr::safe_sqrt(dr::square(v0) + sample * (v1 - v0));
+        dr::masked(sample, divisor != 0.f) /= divisor;
         return sample;
     }
 
@@ -1454,6 +1485,8 @@ protected:
 
     /// Are the probability values normalized?
     bool m_normalized;
+
+    MI_TRAVERSE_CB(Base, m_data, m_marg_cdf, m_cond_cdf)
 };
 
 //! @}

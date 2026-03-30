@@ -1,30 +1,33 @@
 # Import/re-import all files in this folder to register AD integrators
+import mitsuba as mi
+import sys
 
-import os
-import importlib
-import glob
+if mi.variant() is not None and not mi.variant().startswith('scalar'):
+    # List of submodules to import
+    submodules = [
+        'common',
+        'prb_basic',
+        'prb',
+        'prbvolpath',
+        'direct_projective',
+        'prb_projective',
+        'volprim_rf_basic'
+    ]
 
-# Make sure mitsuba.python.util is imported before the integrators
-import mitsuba.util
+    # Are we importing the submodules for the first time or reloading them?
+    reload = submodules[0] in globals()
 
-do_reload = 'common' in globals()
+    import importlib
+    module, name = None, None
 
-if mitsuba.variant() is not None and not mitsuba.variant().startswith('scalar'):
-    # Make sure `common.py` is reloaded before the integrators
-    if do_reload:
-        importlib.reload(globals()['common'])
+    for name in submodules:
+        module = importlib.import_module(f'.{name}', package=__name__)
+        if reload:
+            importlib.reload(module)
 
-    for f in glob.glob(os.path.join(os.path.dirname(__file__), "*.py")):
-        if not os.path.isfile(f) or f.endswith('__init__.py'):
-            continue
+        # Make the submodule available at package level
+        globals()[name] = module
 
-        name = os.path.basename(f)[:-3]
-        if do_reload and not name == 'common':
-            importlib.reload(globals()[name])
-        else:
-            importlib.import_module('mitsuba.ad.integrators.' + name)
+    del importlib, name, submodules, module, reload
 
-        del name
-    del f
-
-del os, glob, importlib, do_reload
+del mi, sys

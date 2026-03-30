@@ -59,7 +59,7 @@ public:
 
     Float eval(Float x, Mask /* active */) const override {
         x = dr::abs(x);
-        Float x2 = dr::sqr(x), x3 = x2*x;
+        Float x2 = dr::square(x), x3 = x2*x;
 
         ScalarFloat a3 = (12.f - 9.f * m_b - 6.f * m_c),
                     a2 = (-18.f + 12.f * m_b + 6.f * m_c),
@@ -82,11 +82,10 @@ public:
         return tfm::format("MitchellNetravaliFilter[radius=%f, B=%f, C=%f]", m_radius, m_b, m_c);
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(MitchellNetravaliFilter)
 protected:
     ScalarFloat m_b, m_c;
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(MitchellNetravaliFilter, ReconstructionFilter)
-MI_EXPORT_PLUGIN(MitchellNetravaliFilter, "Mitchell-Netravali filter");
+MI_EXPORT_PLUGIN(MitchellNetravaliFilter)
 NAMESPACE_END(mitsuba)

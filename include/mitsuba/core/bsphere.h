@@ -5,7 +5,7 @@
 NAMESPACE_BEGIN(mitsuba)
 
 /// Generic n-dimensional bounding sphere data structure
-template <typename Point_> struct BoundingSphere {
+template <typename Point_> struct BoundingSphere: drjit::TraversableBase {
     static constexpr size_t Size = Point_::Size;
     using Point                  = Point_;
     using Float                  = dr::value_t<Point>;
@@ -24,14 +24,14 @@ template <typename Point_> struct BoundingSphere {
 
     /// Equality test against another bounding sphere
     bool operator==(const BoundingSphere &bsphere) const {
-        return dr::all_nested(dr::eq(center, bsphere.center) &&
-                              dr::eq(radius, bsphere.radius));
+        return dr::all_nested((center == bsphere.center) &&
+                              (radius == bsphere.radius));
     }
 
     /// Inequality test against another bounding sphere
     bool operator!=(const BoundingSphere &bsphere) const {
-        return dr::any_nested(dr::neq(center, bsphere.center) ||
-                              dr::neq(radius, bsphere.radius));
+        return dr::any_nested((center != bsphere.center) ||
+                              (radius != bsphere.radius));
     }
 
     /// Return whether this bounding sphere has a radius of zero or less.
@@ -39,7 +39,7 @@ template <typename Point_> struct BoundingSphere {
         return radius <= 0.f;
     }
 
-    /// Expand the bounding sphere radius to contain another point.
+    /// Expand the bounding sphere radius to contain another point
     void expand(const Point &p) {
         radius = dr::maximum(radius, dr::norm(p - center));
     }
@@ -58,9 +58,9 @@ template <typename Point_> struct BoundingSphere {
     template <bool Strict = false>
     Mask contains(const Point &p) const {
         if constexpr (Strict)
-            return dr::squared_norm(p - center) < dr::sqr(radius);
+            return dr::squared_norm(p - center) < dr::square(radius);
         else
-            return dr::squared_norm(p - center) <= dr::sqr(radius);
+            return dr::squared_norm(p - center) <= dr::square(radius);
     }
 
     /// Check if a ray intersects a bounding box
@@ -71,9 +71,11 @@ template <typename Point_> struct BoundingSphere {
         return math::solve_quadratic(
             dr::squared_norm(ray.d),
             2.f * dr::dot(o, ray.d),
-            dr::squared_norm(o) - dr::sqr(radius)
+            dr::squared_norm(o) - dr::square(radius)
         );
     }
+
+    MI_TRAVERSE_CB(drjit::TraversableBase, center, radius)
 };
 
 /// Print a string representation of the bounding sphere

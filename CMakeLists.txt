@@ -16,6 +16,7 @@ project(mitsuba
 
 # A number of Mitsuba 3 features (scripting, differentiable rendering, testing
 # infrastructure, etc.) are only available if Python bindings are built.
+
 option(MI_ENABLE_PYTHON "Build Python bindings for Mitsuba, Dr.Jit, and NanoGUI?" ON)
 
 # Mitsuba 3 ships with its own ray tracing acceleration data structure. If
@@ -41,6 +42,9 @@ endif()
 
 option(MI_PROFILER_ITTNOTIFY "Forward profiler events (to Intel VTune)?" OFF)
 option(MI_PROFILER_NVTX      "Forward profiler events (to NVIDIA Nsight)?" OFF)
+
+option(MI_STABLE_ABI "Build Python extension using the CPython stable ABI? (Only relevant when using scikit-build)" OFF)
+mark_as_advanced(MI_STABLE_ABI)
 
 # ----------------------------------------------------------
 #  Check if submodules have been checked out, or fail early
@@ -79,6 +83,12 @@ include(ext/drjit/ext/drjit-core/ext/nanothread/ext/cmake-defaults/CMakeLists.tx
 # ----------------------------------------------------------
 
 if (SKBUILD)
+
+  set(CMAKE_INSTALL_LIBDIR mitsuba)
+  set(CMAKE_INSTALL_BINDIR mitsuba)
+  set(CMAKE_INSTALL_DATAROOTDIR mitsuba/data)
+  set(CMAKE_INSTALL_INCLUDEDIR mitsuba/include)
+
   set(MI_DRJIT_CMAKE_DIR "" CACHE STRING "Location of Dr.Jit's CMake directory that should be used instead of the output of `drjit.get_cmake_dir()` when building with scikit-build.")
   mark_as_advanced(MI_DRJIT_CMAKE_DIR)
 
@@ -100,8 +110,9 @@ endif()
 # ----------------------------------------------------------
 
 if (NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/mitsuba.conf)
-  # Default: only scalar modes (RGB, Spectral)
-  set(MI_DEFAULT_VARIANTS "scalar_rgb;scalar_spectral;cuda_ad_rgb;llvm_ad_rgb" CACHE STRING "Default Mitsuba variants that should be included if no mitsuba.conf file exists")
+  set(MI_DEFAULT_VARIANTS "scalar_rgb,scalar_spectral,cuda_ad_rgb,llvm_ad_rgb,llvm_ad_spectral" CACHE STRING "Default Mitsuba variants that should be included if no mitsuba.conf file exists")
+  string(REPLACE "," ";" MI_DEFAULT_VARIANTS "${MI_DEFAULT_VARIANTS}")
+  message(STATUS "MI_DEFAULT_VARIANTS: ${MI_DEFAULT_VARIANTS}")
   mark_as_advanced(MI_DEFAULT_VARIANTS)
   foreach(TMP ${MI_DEFAULT_VARIANTS})
     string(APPEND INSERT_CONFIGURATIONS_HERE "\"${TMP}\", ")
@@ -282,9 +293,10 @@ set(CMAKE_INSTALL_RPATH "${MI_ORIGIN};${MI_ORIGIN}/../drjit")
 # Build the dependencies
 add_subdirectory(ext)
 
-# Always add the include directories for tinyformat, Dr.Jit and Eigen
+# Always add the include directories for tinyformat, nanobind, Dr.Jit and Eigen
 include_directories(include
   ${TINYFORMAT_INCLUDE_DIRS}
+  ${NANOBIND_INCLUDE_DIRS}
   ${CMAKE_CURRENT_BINARY_DIR}/include
 )
 
@@ -349,6 +361,15 @@ if (MSVC)
 
   # Don't complain about incompatible modifier on explicit instantiations
   add_compile_options(/wd4910)
+
+  # Ensure source and execution charset is encoded as UTF-8
+  add_compile_options(/utf-8)
+
+  # Workaround to avoid a particular crash due to MS VC++ runtime library binary 
+  # incompatibility. In general the runtime version needs to be at least as new 
+  # as toolset version but this define provides one such "escape hatch" if that 
+  # strictly isn't the case to combat against a commonly encountered reported crash
+  add_compile_options(-D_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 endif()
 
 include(TestBigEndian)
@@ -440,7 +461,7 @@ if (NOT SKBUILD)
     add_custom_target(mkdoc-api
         ${SPHINX_EXECUTABLE} -b html "${SPHINX_INPUT_DIR_API}" "${SPHINX_OUTPUT_DIR_API}"
         COMMENT "Building HTML documentation with Sphinx"
-        DEPENDS copy-python-src
+        DEPENDS mitsuba-copy-python-src
         USES_TERMINAL)
   endif()
 endif()
@@ -468,7 +489,7 @@ endif()
 list(APPEND MI_DEPEND png jpeg)
 
 if (WIN32)
-list(APPEND MI_DEPEND zlib)
+  list(APPEND MI_DEPEND zlib)
 endif()
 
 if (MI_ENABLE_EMBREE)
@@ -483,20 +504,18 @@ if (NOT SKBUILD)
   endif()
 
   if (MI_ENABLE_AUTODIFF)
-    list(APPEND MI_DEPEND drjit-autodiff)
+    list(APPEND MI_DEPEND drjit-extra)
   endif()
 endif()
 
 # Copy shared libraries to Python folders (no rpath on Windows)
 if (MSVC AND MI_ENABLE_PYTHON)
-  add_custom_target(copy-targets ALL)
-
   set(COPY_TARGETS mitsuba ${MI_DEPEND} ${MI_PLUGIN_TARGETS})
+  add_custom_target(copy-targets ALL DEPENDS ${COPY_TARGETS})
+
   foreach(target ${COPY_TARGETS})
     get_target_property(TARGET_FOLDER ${target} FOLDER)
-    if (TARGET_FOLDER STREQUAL "drjit")
-        set(COPY_TARGET_DESTINATION ${MI_BINARY_DIR}/python/drjit/$<TARGET_FILE_NAME:${target}>)
-    elseif(TARGET_FOLDER MATCHES "plugins/.*$")
+    if(TARGET_FOLDER MATCHES "plugins/.*$")
         set(COPY_TARGET_DESTINATION ${MI_BINARY_DIR}/python/mitsuba/plugins/$<TARGET_FILE_NAME:${target}>)
     else()
         set(COPY_TARGET_DESTINATION ${MI_BINARY_DIR}/python/mitsuba/$<TARGET_FILE_NAME:${target}>)
@@ -505,7 +524,6 @@ if (MSVC AND MI_ENABLE_PYTHON)
       TARGET copy-targets POST_BUILD
       COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:${target}> ${COPY_TARGET_DESTINATION}
-      DEPENDS ${target}
     )
   endforeach(target)
 
@@ -568,16 +586,17 @@ install(
 
 add_custom_target(copy-resources ALL DEPENDS ${MI_COPY_FILES})
 
+# IOR data
 file(GLOB IOR_FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/data/ior/*spd")
 add_custom_command(
-  TARGET copy-resources DEPENDS IOR_FILES
+  TARGET copy-resources POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
   "${CMAKE_CURRENT_SOURCE_DIR}/resources/data/ior"
   "${MI_BINARY_DIR}/data/ior"
 )
 if (MSVC AND MI_ENABLE_PYTHON)
   add_custom_command(
-    TARGET copy-resources DEPENDS IOR_FILES
+    TARGET copy-resources POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
     "${CMAKE_CURRENT_SOURCE_DIR}/resources/data/ior"
     "${MI_BINARY_DIR}/python/mitsuba/data/ior"
@@ -585,5 +604,26 @@ if (MSVC AND MI_ENABLE_PYTHON)
 endif()
 install(
   DIRECTORY ${MI_BINARY_DIR}/data/ior
+  DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}
+)
+
+# Sunsky data
+file(GLOB SUNSKY_FILES "${CMAKE_CURRENT_SOURCE_DIR}/resources/data/sunsky/output/*.bin")
+add_custom_command(
+  TARGET copy-resources POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+  "${CMAKE_CURRENT_SOURCE_DIR}/resources/data/sunsky/output"
+  "${MI_BINARY_DIR}/data/sunsky"
+)
+if (MSVC AND MI_ENABLE_PYTHON)
+  add_custom_command(
+    TARGET copy-resources POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/resources/data/sunsky/output"
+    "${MI_BINARY_DIR}/python/mitsuba/data/sunsky"
+  )
+endif()
+install(
+  DIRECTORY ${MI_BINARY_DIR}/data/sunsky
   DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}
 )

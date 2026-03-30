@@ -5,6 +5,7 @@
 #include <mitsuba/render/medium.h>
 #include <mitsuba/render/shape.h>
 #include <mitsuba/render/texture.h>
+#include <drjit/traversable_base.h>
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -67,17 +68,16 @@ public:
                   "The area light inherits this transformation from its parent "
                   "shape.");
 
-        m_radiance = props.texture_d65<Texture>("radiance", 1.f);
+        m_radiance = props.get_emissive_texture<Texture>("radiance", 1.f);
 
         m_flags = +EmitterFlags::Surface;
         if (m_radiance->is_spatially_varying())
             m_flags |= +EmitterFlags::SpatiallyVarying;
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        Base::traverse(callback);
-        callback->put_object("radiance", m_radiance.get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        Base::traverse(cb);
+        cb->put("radiance", m_radiance, ParamFlags::Differentiable);
     }
 
     Spectrum eval(const SurfaceInteraction3f &si, Mask active) const override {
@@ -117,7 +117,15 @@ public:
     std::pair<DirectionSample3f, Spectrum>
     sample_direction(const Interaction3f &it, const Point2f &sample, Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointSampleDirection, active);
-        Assert(m_shape, "Can't sample from an area emitter without an associated Shape.");
+
+        if constexpr (drjit::is_jit_v<Float>) {
+            if (!m_shape)
+                return { dr::zeros<DirectionSample3f>(), 0.f };
+        } else {
+            Assert(m_shape, "Can't sample from an area emitter without an "
+                            "associated Shape.");
+        }
+
         DirectionSample3f ds;
         SurfaceInteraction3f si;
 
@@ -125,13 +133,13 @@ public:
         if (likely(!m_radiance->is_spatially_varying())) {
             // Texture is uniform, try to importance sample the shape wrt. solid angle at 'it'
             ds = m_shape->sample_direction(it, sample, active);
-            active &= dr::dot(ds.d, ds.n) < 0.f && dr::neq(ds.pdf, 0.f);
+            active &= dr::dot(ds.d, ds.n) < 0.f && (ds.pdf != 0.f);
 
             si = SurfaceInteraction3f(ds, it.wavelengths);
         } else {
             // Importance sample the texture, then map onto the shape
             auto [uv, pdf] = m_radiance->sample_position(sample, active);
-            active &= dr::neq(pdf, 0.f);
+            active &= (pdf != 0.f);
 
             si = m_shape->eval_parameterization(uv, +RayFlags::All, active);
             si.wavelengths = it.wavelengths;
@@ -165,6 +173,14 @@ public:
         Float dp = dr::dot(ds.d, ds.n);
         active &= dp < 0.f;
 
+        if constexpr (drjit::is_jit_v<Float>) {
+            if (!m_shape)
+                return 0.f;
+        } else {
+            Assert(m_shape,
+                   "The area emitter without has no associated Shape!");
+        }
+
         Float value;
         if (!m_radiance->is_spatially_varying()) {
             value = m_shape->pdf_direction(it, ds, active);
@@ -173,7 +189,7 @@ public:
             SurfaceInteraction3f si = m_shape->eval_parameterization(ds.uv, +RayFlags::dPdUV, active);
             active &= si.is_valid();
 
-            value = m_radiance->pdf_position(ds.uv, active) * dr::sqr(ds.dist) /
+            value = m_radiance->pdf_position(ds.uv, active) * dr::square(ds.dist) /
                     (dr::norm(dr::cross(si.dp_du, si.dp_dv)) * -dp);
         }
 
@@ -196,7 +212,14 @@ public:
     sample_position(Float time, const Point2f &sample,
                     Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointSamplePosition, active);
-        Assert(m_shape, "Cannot sample from an area emitter without an associated Shape.");
+
+        if constexpr (drjit::is_jit_v<Float>) {
+            if (!m_shape)
+                return { dr::zeros<PositionSample3f>(), 0.f };
+        } else {
+            Assert(m_shape, "Cannot sample from an area emitter without an "
+                            "associated Shape.");
+        }
 
         // Two strategies to sample the spatial component based on 'm_radiance'
         PositionSample3f ps;
@@ -206,7 +229,7 @@ public:
         } else {
             // Importance sample texture
             auto [uv, pdf] = m_radiance->sample_position(sample, active);
-            active &= dr::neq(pdf, 0.f);
+            active &= (pdf != 0.f);
 
             auto si = m_shape->eval_parameterization(uv, +RayFlags::All, active);
             active &= si.is_valid();
@@ -244,11 +267,12 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(AreaLight)
 private:
     ref<Texture> m_radiance;
+
+    MI_TRAVERSE_CB(Base, m_radiance)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(AreaLight, Emitter)
-MI_EXPORT_PLUGIN(AreaLight, "Area emitter")
+MI_EXPORT_PLUGIN(AreaLight)
 NAMESPACE_END(mitsuba)

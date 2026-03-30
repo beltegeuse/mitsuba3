@@ -1,6 +1,6 @@
 #pragma once
 
-#include <drjit/array_utils.h>
+#include <drjit/array.h>
 #include <mitsuba/core/object.h>
 #include <mitsuba/core/logger.h>
 #include <set>
@@ -54,8 +54,11 @@ public:
      */
     Stream();
 
+    /// Destructor
+    ~Stream();
+
     /// Returns a human-readable descriptor of the stream
-    virtual std::string to_string() const override;
+    std::string to_string() const override;
 
     /** \brief Closes the stream.
      *
@@ -221,11 +224,8 @@ public:
     /// @}
     // =========================================================================
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(Stream)
 protected:
-    /// Destructor
-    virtual ~Stream();
-
     /// Copying is disallowed.
     Stream(const Stream&) = delete;
     void operator=(const Stream&) = delete;

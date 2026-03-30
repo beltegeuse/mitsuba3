@@ -19,11 +19,11 @@ High dynamic range film (:monosp:`hdrfilm`)
 -------------------------------------------
 
 .. pluginparameters::
- :extra-rows: 7
+ :extra-rows: 8
 
  * - width, height
    - |int|
-   - Width and height of the camera sensor in pixels. Default: 768, 576)
+   - Width and height of the camera sensor in pixels. (Default: 768, 576)
 
  * - file_format
    - |string|
@@ -39,7 +39,7 @@ High dynamic range film (:monosp:`hdrfilm`)
 
  * - component_format
    - |string|
-   - Specifies the desired floating  point component format of output images (when saving to disk).
+   - Specifies the desired floating point component format of output images (when saving to disk).
      The options are :monosp:`float16`, :monosp:`float32`, or :monosp:`uint32`.
      (Default: :monosp:`float16`)
 
@@ -140,11 +140,11 @@ public:
 
     HDRFilm(const Properties &props) : Base(props) {
         std::string file_format = string::to_lower(
-            props.string("file_format", "openexr"));
+            props.get<std::string_view>("file_format", "openexr"));
         std::string pixel_format = string::to_lower(
-            props.string("pixel_format", "rgb"));
+            props.get<std::string_view>("pixel_format", "rgb"));
         std::string component_format = string::to_lower(
-            props.string("component_format", "float16"));
+            props.get<std::string_view>("component_format", "float16"));
 
         if (file_format == "openexr" || file_format == "exr")
             m_file_format = Bitmap::FileFormat::OpenEXR;
@@ -259,6 +259,8 @@ public:
 
         /* locked */ {
             std::lock_guard<std::mutex> lock(m_mutex);
+            if (dr::is_jit_v<Float> && m_storage == nullptr)
+                jit_freeze_discard(drjit::detail::backend<Float>::value, "Image Block was allocated");
             m_storage = new ImageBlock(m_crop_size, m_crop_offset,
                                        (uint32_t) channels.size());
             m_channels = channels;
@@ -277,7 +279,7 @@ public:
         bool warn = !dr::is_jit_v<Float> && !is_spectral_v<Spectrum> &&
                     m_channels.size() <= 5;
 
-        bool default_config = size == ScalarVector2u(0);
+        bool default_config = dr::all(size == ScalarVector2u(0));
 
         return new ImageBlock(default_config ? m_crop_size : size,
                               default_config ? m_crop_offset : ScalarPoint2u(0),
@@ -365,7 +367,7 @@ public:
 
             // If luminance + alpha, shift alpha channel to skip the GB channels
             if (alpha && to_y)
-                values_idx[dr::eq(channel_idx, color_ch /* alpha */)] += 2;
+                values_idx[channel_idx == color_ch /* alpha */] += 2;
 
             Mask value_mask = true;
 
@@ -397,7 +399,7 @@ public:
             }
 
             // Perform the weight division unless the weight is zero
-            values /= dr::select(dr::eq(weight, 0.f), 1.f, weight);
+            values /= dr::select(weight == 0.f, 1.f, weight);
 
             size_t shape[3] = { (size_t) size.y(), (size_t) size.x(),
                                 target_ch };
@@ -604,7 +606,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(HDRFilm)
 protected:
     Bitmap::FileFormat m_file_format;
     Bitmap::PixelFormat m_pixel_format;
@@ -613,8 +615,9 @@ protected:
     ref<ImageBlock> m_storage;
     mutable std::mutex m_mutex;
     std::vector<std::string> m_channels;
+
+    MI_TRAVERSE_CB(Base, m_storage)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(HDRFilm, Film)
-MI_EXPORT_PLUGIN(HDRFilm, "HDR Film")
+MI_EXPORT_PLUGIN(HDRFilm)
 NAMESPACE_END(mitsuba)

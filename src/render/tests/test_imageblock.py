@@ -34,7 +34,8 @@ def test01_construct(variant_scalar_rgb):
 @pytest.mark.parametrize("normalize", [ False, True ])
 @pytest.mark.parametrize("coalesce", [ False, True ])
 @pytest.mark.parametrize("compensate", [ False, True ])
-def test02_put(variants_all, filter_name, border, offset, normalize, coalesce, compensate):
+@pytest.mark.parametrize("active", [ False, True ])
+def test02_put(variants_all, filter_name, border, offset, normalize, coalesce, compensate, active):
     # Checks the result of the ImageBlock::put() method
     # against a brute force reference
     scalar = 'scalar' in mi.variant()
@@ -61,7 +62,7 @@ def test02_put(variants_all, filter_name, border, offset, normalize, coalesce, c
                                   normalize=normalize,
                                   coalesce=coalesce)
 
-            block.put(pos=pos, values=[1])
+            block.put(pos=pos, values=[1], active=active)
 
             size += 2 * block.border_size()
             Array1f = mi.Float if not scalar else dr.scalar.ArrayXf
@@ -103,9 +104,14 @@ def test02_put(variants_all, filter_name, border, offset, normalize, coalesce, c
                                        block.tensor().shape)
 
             if normalize:
-                value = dr.sum(ref_norm)
+                value = dr.sum(ref_norm, axis=None)
                 if dr.all(value > 0):
                     ref /= value
+
+            if not active:
+                ref *=0
+                ref_norm *= 0
+
             match = dr.allclose(block.tensor(), ref, atol=1e-5)
 
             if not match:
@@ -126,8 +132,8 @@ def test03_put_boundary(variants_all_rgb, filter_name):
     im.clear()
     im.put([1.5, 1.5], [1.0])
     if dr.is_jit_v(mi.Float):
-        a = dr.slice(rfilter.eval(0))
-        b = dr.slice(rfilter.eval(1))
+        a = dr.slice(rfilter.eval(0), 0)
+        b = dr.slice(rfilter.eval(1), 0)
         c = b**2
         assert dr.allclose(im.tensor().array, [c, b, c,
                                                b, a, b,
@@ -204,10 +210,10 @@ def test04_read(variants_all, filter_name, border, offset, normalize, enable_ad)
                     ref /= weights
             else:
                 weight = rfilter.eval(-p[0]) * rfilter.eval(-p[1])
-                ref = dr.sum(weight * dr.detach(source_tensor.array))
+                ref = dr.sum(weight * dr.detach(source_tensor.array), axis=None)
 
                 if normalize:
-                    ref /= dr.sum(weight)
+                    ref /= dr.sum(weight, axis=None)
 
             assert dr.allclose(value, ref, atol=1e-5)
 
@@ -238,7 +244,7 @@ def test05_boundary_effects(variants_vec_rgb, coalesce, normalize):
 
 @pytest.mark.parametrize("compensate", [ False, True ])
 def test06_error_compensation(variants_any_cuda, compensate):
-    with dr.scoped_set_flag(dr.JitFlag.AtomicReduceLocal, False):
+    with dr.scoped_set_flag(dr.JitFlag.ScatterReduceLocal, False):
         ib = mi.ImageBlock(
             size=(1, 1),
             offset=(0, 0),

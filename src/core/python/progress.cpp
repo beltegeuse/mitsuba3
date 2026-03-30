@@ -2,8 +2,10 @@
 #include <mitsuba/core/logger.h>
 #include <mitsuba/core/appender.h>
 #include <mitsuba/core/thread.h>
-#include <pybind11/eval.h>
 #include <mitsuba/python/python.h>
+
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
 
 /// Escape strings to make them HTML-safe
 std::string escape_html(const std::string& data) {
@@ -29,24 +31,24 @@ std::string escape_html(const std::string& data) {
 class JupyterNotebookAppender : public Appender {
 public:
     JupyterNotebookAppender() {
-        py::module_ ipywidgets = py::module_::import("ipywidgets");
+        nb::module_ ipywidgets = nb::module_::import_("ipywidgets");
         m_float_progress = ipywidgets.attr("FloatProgress");
         m_html = ipywidgets.attr("HTML");
         m_layout = ipywidgets.attr("Layout");
         m_vbox = ipywidgets.attr("VBox");
-        py::module_ display = py::module_::import("IPython.display");
-        m_flush = py::module_::import("sys").attr("stdout").attr("flush");
+        nb::module_ display = nb::module_::import_("IPython.display");
+        m_flush = nb::module_::import_("sys").attr("stdout").attr("flush");
         m_display = display.attr("display");
         m_display_html = display.attr("display_html");
-        m_label = m_bar = py::none();
+        m_label = m_bar = nb::none();
     }
 
     /// Append a line of text with the given log level
-    virtual void append(mitsuba::LogLevel level, const std::string &text) override {
+    virtual void append(mitsuba::LogLevel level, std::string_view text) override {
         std::string html_string;
 
         if (level == Info) {
-            html_string = "<span style=\"font-family: monospace\">" + escape_html(text) + "</span>";
+            html_string = "<span style=\"font-family: monospace\">" + escape_html(std::string(text)) + "</span>";
         } else {
             std::string col = "#000";
             if (level == Debug)
@@ -55,18 +57,18 @@ public:
                 col = "#f55";
 
             html_string = "<span style=\"font-family: monospace; color: " + col +
-                          "\">" + escape_html(text) + "</span>";
+                          "\">" + escape_html(std::string(text)) + "</span>";
         }
 
-        py::gil_scoped_acquire gil;
+        nb::gil_scoped_acquire gil;
         m_display_html(html_string, "raw"_a = true);
         m_flush();
     }
 
-    virtual void log_progress(float progress, const std::string &name,
-        const std::string & /* formatted */, const std::string &eta,
+    virtual void log_progress(float progress, std::string_view name,
+        std::string_view /* formatted */, std::string_view eta,
         const void * /* ptr */) override {
-        py::gil_scoped_acquire gil;
+        nb::gil_scoped_acquire gil;
 
         /* Heuristic: display the bar when it is created,
          * or when progress starts over.
@@ -74,10 +76,10 @@ public:
         make_and_display_progress_bar(progress == 0.f);
 
         m_bar.attr("value") = progress;
-        m_label.attr("value") = escape_html(name) + " " + eta;
+        m_label.attr("value") = escape_html(std::string(name)) + " " + std::string(eta);
         if (progress == 1.f) {
             m_bar.attr("bar_style") = "success";
-            m_label = m_bar = py::none();
+            m_label = m_bar = nb::none();
         }
         m_flush();
     }
@@ -92,23 +94,23 @@ public:
         }
 
         if (!exists || display) {
-            auto vbox = m_vbox("children"_a = py::make_tuple(m_label, m_bar));
+            auto vbox = m_vbox("children"_a = nb::make_tuple(m_label, m_bar));
             m_display(vbox);
         }
     }
 private:
     // Imports
-    py::object m_float_progress;
-    py::object m_html;
-    py::object m_layout;
-    py::object m_display;
-    py::object m_display_html;
-    py::object m_vbox;
-    py::object m_flush;
+    nb::object m_float_progress;
+    nb::object m_html;
+    nb::object m_layout;
+    nb::object m_display;
+    nb::object m_display_html;
+    nb::object m_vbox;
+    nb::object m_flush;
 
     // Progress bar
-    py::object m_bar;
-    py::object m_label;
+    nb::object m_bar;
+    nb::object m_label;
 };
 
 #if defined(__GNUG__)
@@ -118,18 +120,25 @@ private:
 MI_PY_EXPORT(ProgressReporter) {
     /* Install a custom appender for log + progress messages if Mitsuba is
      * running within Jupyter notebook */
-    py::object modules = py::module_::import("sys").attr("modules");
-    if (!modules.contains("ipykernel"))
+    try {
+        nb::object ipython = nb::getattr(nb::builtins(), "get_ipython", nb::none());
+        if (ipython.is(nb::none()))
+            return;
+        nb::object name = ipython().attr("__class__").attr("__name__");
+        if (!name.equal(nb::str("ZMQInteractiveShell")))
+            return;
+    } catch (...) {
         return;
+    }
 
-    Logger *logger = Thread::thread()->logger();
+    Logger *logger = mitsuba::logger();
     logger->clear_appenders();
 
     try {
         // First try to import ipywidgets
-        py::module_::import("ipywidgets");
+        nb::module_::import_("ipywidgets");
     } catch(const std::exception&) {
-        py::print("\033[93m[mitsuba] Warning: Couldn't import the ipywidgets "
+        nb::print("\033[93m[mitsuba] Warning: Couldn't import the ipywidgets "
                   "package. Installing this package is required for the system "
                   "to properly log messages and print in Jupyter notebooks!");
         return;

@@ -55,34 +55,39 @@ public:
     ConstantBackgroundEmitter(const Properties &props) : Base(props) {
         /* Until `set_scene` is called, we have no information
            about the scene and default to the unit bounding sphere. */
-        m_bsphere = ScalarBoundingSphere3f(ScalarPoint3f(0.f), 1.f);
+        m_bsphere = BoundingSphere3f(ScalarPoint3f(0.f), 1.f);
         m_surface_area = 4.f * dr::Pi<ScalarFloat>;
 
-        m_radiance = props.texture_d65<Texture>("radiance", 1.f);
+        m_radiance = props.get_emissive_texture<Texture>("radiance", 1.f);
 
         if (m_radiance->is_spatially_varying())
             Throw("Expected a non-spatially varying radiance spectra!");
 
         m_flags = +EmitterFlags::Infinite;
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        Base::traverse(callback);
-        callback->put_object("radiance", m_radiance.get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        Base::traverse(cb);
+        cb->put("radiance", m_radiance, ParamFlags::Differentiable);
     }
 
     void set_scene(const Scene *scene) override {
         if (scene->bbox().valid()) {
-            m_bsphere = scene->bbox().bounding_sphere();
+            ScalarBoundingSphere3f scene_sphere =
+                scene->bbox().bounding_sphere();
+            m_bsphere = BoundingSphere3f(scene_sphere.center, scene_sphere.radius);
             m_bsphere.radius =
                 dr::maximum(math::RayEpsilon<Float>,
                         m_bsphere.radius * (1.f + math::RayEpsilon<Float>));
         } else {
-            m_bsphere = ScalarBoundingSphere3f(ScalarPoint3f(0.f), 1.f);
+            m_bsphere.center = 0.f;
+            m_bsphere.radius = math::RayEpsilon<Float>;
         }
-        m_surface_area = 4.f * dr::Pi<ScalarFloat> * dr::sqr(m_bsphere.radius);
+        m_surface_area = 4.f * dr::Pi<ScalarFloat> * dr::square(m_bsphere.radius);
+
+        dr::make_opaque(m_bsphere.center, m_bsphere.radius, m_surface_area);
     }
+
 
     Spectrum eval(const SurfaceInteraction3f &si, Mask active) const override {
         MI_MASKED_FUNCTION(ProfilerPhase::EndpointEvaluate, active);
@@ -192,15 +197,16 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(ConstantBackgroundEmitter)
 protected:
     ref<Texture> m_radiance;
-    ScalarBoundingSphere3f m_bsphere;
+    BoundingSphere3f m_bsphere;
 
     /// Surface area of the bounding sphere
-    ScalarFloat m_surface_area;
+    Float m_surface_area;
+
+    MI_TRAVERSE_CB(Base, m_radiance, m_bsphere, m_surface_area)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(ConstantBackgroundEmitter, Emitter)
-MI_EXPORT_PLUGIN(ConstantBackgroundEmitter, "Constant background emitter")
+MI_EXPORT_PLUGIN(ConstantBackgroundEmitter)
 NAMESPACE_END(mitsuba)

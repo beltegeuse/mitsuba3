@@ -2,330 +2,251 @@
 #include <mitsuba/core/transform.h>
 #include <mitsuba/core/frame.h>
 #include <mitsuba/core/properties.h>
-#include <pybind11/numpy.h>
 #include <mitsuba/python/python.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/list.h>
+#include <nanobind/ndarray.h>
 
-/// This class extends Transform to add support for chaining methods such as
-/// scale, translate, rotate, ...
-template <typename Float, int Dimension>
-struct ChainTransform : Transform<Point<Float, Dimension>> {
-    using Base = Transform<Point<Float, Dimension>>;
-    using Base::matrix;
-    using Base::inverse_transpose;
-    ChainTransform(const Base &t) : Base(t) { }
-    ChainTransform(Base &&t) {
-        matrix = std::move(t.matrix);
-        inverse_transpose = std::move(t.inverse_transpose);
+inline void transform_affine_is_deprecated_warning() {
+    if (PyErr_WarnEx(PyExc_DeprecationWarning,
+            "transform_affine() is deprecated and will be removed in a future version. "
+            "Use the @ operator instead, which is now optimized for affine transforms.", 1) < 0) {
+        nb::raise_python_error();
     }
-};
-
-template <typename Float>
-void bind_transform3(py::module &m, const char *name) {
-    MI_IMPORT_CORE_TYPES()
-    using ChainTransform3f = ChainTransform<Float, 3>;
-
-    auto trans3 = py::class_<Transform3f>(m, name, D(Transform))
-        .def(py::init<>(), "Initialize with the identity matrix")
-        .def(py::init<const Transform3f &>(), "Copy constructor")
-        .def(py::init([](py::array a) {
-            if (a.size() == 9)
-                return new Transform3f(py::cast<ScalarMatrix3f>(a));
-            else
-                return new Transform3f(py::cast<Matrix3f>(a));
-        }))
-        .def(py::init([](const py::list &list) {
-            size_t size = list.size();
-            if (size != 3)
-                throw py::reference_cast_error();
-            ScalarMatrix3f m;
-            for (size_t i = 0; i < size; ++i)
-                m[i] = py::cast<ScalarVector3f>(list[i]);
-            return new Transform3f(transpose(m));
-        }))
-        .def(py::init<Matrix3f>(), D(Transform, Transform))
-        .def(py::init<Matrix3f, Matrix3f>(), "Initialize from a matrix and its inverse transpose")
-
-        .def_static("translate", [](const Point2f &v) {
-            return ChainTransform3f(Transform3f::translate(v));
-        }, "v"_a, D(Transform, translate))
-        .def_static("scale", [](const Point2f &v) {
-            return ChainTransform3f(Transform3f::scale(v));
-        }, "v"_a, D(Transform, scale))
-        .def_static("rotate", [](const Float &a) {
-            return ChainTransform3f(Transform3f::template rotate<3>(a));
-        }, "angle"_a, D(Transform, rotate, 2))
-
-        .def("has_scale", &Transform3f::has_scale, D(Transform, has_scale))
-        /// Operators
-        .def(py::self == py::self)
-        .def(py::self != py::self)
-        .def("__mul__", [](const Transform3f &, const Transform3f &) {
-            throw std::runtime_error("mul(): please use the matrix "
-                "multiplication operator '@' instead.");
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform3f &a, const Transform3f &b) {
-            return a * b;
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform3f &a, const Point2f &b) {
-            return a * b;
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform3f &a, const Vector2f &b) {
-            return a * b;
-        }, py::is_operator())
-        .def("transform_affine", [](const Transform3f &a, const Point2f &b) {
-            return a.transform_affine(b);
-        }, "p"_a, D(Transform, transform_affine))
-        .def("transform_affine", [](const Transform3f &a, const Vector2f &b) {
-            return a.transform_affine(b);
-        }, "v"_a, D(Transform, transform_affine))
-        /// Fields
-        .def("inverse",   &Transform3f::inverse, D(Transform, inverse))
-        .def("translation", &Transform3f::translation, D(Transform, translation))
-        .def("has_scale", &Transform3f::has_scale, D(Transform, has_scale))
-        .def_readwrite("matrix", &Transform3f::matrix)
-        .def_readwrite("inverse_transpose", &Transform3f::inverse_transpose)
-        .def_repr(Transform3f);
-
-    if constexpr (dr::is_dynamic_v<Float>)
-        trans3.def(py::init<const ScalarTransform3f &>(), "Broadcast constructor");
-
-    MI_PY_DRJIT_STRUCT(trans3, Transform3f, matrix, inverse_transpose)
-
-    std::string chain_name = std::string("Chain") + std::string(name);
-    py::class_<ChainTransform3f, Transform3f>(m, chain_name.c_str(), D(Transform))
-        .def("translate", [](const ChainTransform3f &t, const Point2f &v) {
-            return ChainTransform3f(t * Transform3f::translate(v));
-        }, "v"_a, D(Transform, translate))
-        .def("scale", [](const ChainTransform3f &t, const Point2f &v) {
-            return ChainTransform3f(t * Transform3f::scale(v));
-        }, "v"_a, D(Transform, scale))
-        .def("rotate", [](const ChainTransform3f &t, const Float &a) {
-            return ChainTransform3f(t * Transform3f::template rotate<3>(a));
-        }, "angle"_a, D(Transform, rotate, 2));
-
-    py::implicitly_convertible<ChainTransform3f, Transform3f>();
 }
 
-template <typename Float, typename Spectrum>
-void bind_transform4(py::module &m, const char *name) {
+template <typename Transform, typename Float, typename Spectrum, size_t Dimension>
+void bind_transform(nb::module_ &m, const char *name) {
+    // Check if already bound, if so just return existing handle
+    if (auto h = nb::type<Transform>(); h.is_valid()) {
+        m.attr(name) = h;
+        return;
+    }
+
     MI_IMPORT_CORE_TYPES()
-    using Ray3f = Ray<Point<Float, 3>, Spectrum>;
-    using ChainTransform4f = ChainTransform<Float, 4>;
 
-    auto trans4 = py::class_<Transform4f>(m, name, D(Transform))
-        .def(py::init<>(), "Initialize with the identity matrix")
-        .def(py::init<const Transform4f &>(), "Copy constructor")
-        .def(py::init([](py::array a) {
-            if (a.size() == 16)
-                return new Transform4f(py::cast<ScalarMatrix4f>(a));
-            else
-                return new Transform4f(py::cast<Matrix4f>(a));
-        }))
-        .def(py::init([](const py::list &list) {
-            size_t size = list.size();
-            if (size != 4)
-                throw py::reference_cast_error();
-            ScalarMatrix4f m;
-            for (size_t i = 0; i < size; ++i)
-                m[i] = py::cast<ScalarVector4f>(list[i]);
-            return new Transform4f(transpose(m));
-        }))
-        .def(py::init<Matrix4f>(), D(Transform, Transform))
-        .def(py::init<Matrix4f, Matrix4f>(), "Initialize from a matrix and its inverse transpose")
+    using ScalarType = dr::scalar_t<Float>;
+    using PointType = Point<Float, Dimension - 1>;
+    using VectorType = Vector<Float, Dimension - 1>;
+    using MatrixType = dr::Matrix<Float, Dimension>;
+    using RayType = Ray<PointType, Spectrum>;
+    using ScalarMatrix = dr::Matrix<ScalarType, Dimension>;
+    using ScalarPoint = Point<ScalarType, Dimension>;
+    using NdMatrix = nb::ndarray<ScalarType, nb::shape<Dimension, Dimension>,
+                                 nb::c_contig, nb::device::cpu>;
 
-        .def_static("translate", [](const Point3f &v) {
-            return ChainTransform4f(Transform4f::translate(v));
-        }, "v"_a, D(Transform, translate))
-        .def_static("scale", [](const Point3f &v) {
-            return ChainTransform4f(Transform4f::scale(v));
-        }, "v"_a, D(Transform, scale))
-        .def_static("rotate", [](const Point3f &v, const Float &a) {
-            return ChainTransform4f(Transform4f::rotate(v, a));
-        }, "axis"_a, "angle"_a, D(Transform, rotate))
-        .def_static("perspective", [](const Float &fov, const Float &near, const Float &far) {
-            return ChainTransform4f(Transform4f::template perspective<4>(fov, near, far));
-        }, "fov"_a, "near"_a, "far"_a, D(Transform, perspective))
-        .def_static("orthographic", [](const Float &near, const Float &far) {
-            return ChainTransform4f(Transform4f::orthographic(near, far));
-        }, "near"_a, "far"_a, D(Transform, orthographic))
-        .def_static("look_at", [](const Point3f &origin, const Point3f &target, const Point3f &up) {
-            return ChainTransform4f(Transform4f::template look_at<4>(origin, target, up));
-        }, "origin"_a, "target"_a, "up"_a, D(Transform, look_at))
-        .def_static("from_frame", [](const Frame3f &f) {
-            return ChainTransform4f(Transform4f::template from_frame<Float>(f));
-        }, "frame"_a, D(Transform, from_frame))
-        .def_static("to_frame", [](const Frame3f &f) {
-            return ChainTransform4f(Transform4f::template to_frame<Float>(f));
-        }, "frame"_a, D(Transform, to_frame))
+    constexpr bool IsAffine = Transform::IsAffine;
+    constexpr bool IsProjective = !IsAffine;
 
-        .def("translation", &Transform4f::translation, D(Transform, translation))
-        .def("has_scale", &Transform4f::has_scale, D(Transform, has_scale))
-        .def("extract", &Transform4f::template extract<3>, D(Transform, extract))
+    auto cls = nb::class_<Transform>(m, name, D(Transform))
+        .def(nb::init<>(), "Initialize with the identity matrix")
+        .def(nb::init<const MatrixType &>(), "Construct from a matrix")
+        .def(nb::init<const MatrixType &, const MatrixType &>(), "Construct from a matrix and its inverse transpose")
+        .def(nb::init<const AffineTransform<typename Transform::Point> &>(), "Construct from an affine transformation")
+        .def(nb::init<const ProjectiveTransform<typename Transform::Point> &>(), "Construct from an projective transformation")
+
+        // Matrix initialization
+        .def("__init__", [](Transform *t, NdMatrix a) {
+            auto v = a.view();
+            ScalarMatrix m;
+            for (size_t i = 0; i < Dimension; ++i)
+                for (size_t j = 0; j < Dimension; ++j)
+                    m.entry(i, j) = v(i, j);
+            new (t) Transform(m);
+        })
+        .def(nb::init<MatrixType>(), D(Transform, Transform))
+        .def(nb::init<MatrixType, MatrixType>(), "Initialize from a matrix and its inverse transpose")
+
+        // List initialization
+        .def("__init__", [](Transform *t, const nb::sequence &seq) {
+            using Row = dr::value_t<MatrixType>;
+
+            size_t size = nb::len(seq);
+            if (size != Dimension)
+                throw nb::next_overload();
+
+            MatrixType m;
+            for (size_t i = 0; i < size; ++i) {
+                if (!nb::try_cast<Row>(seq[i], m.entry(i)))
+                    throw nb::next_overload();
+            }
+
+            new (t) Transform(m);
+        })
+
         /// Operators
-        .def(py::self == py::self)
-        .def(py::self != py::self)
-        .def("__mul__", [](const Transform4f &, const Transform4f &) {
+        .def(nb::self == nb::self)
+        .def(nb::self != nb::self)
+
+        // Matrix multiplication operator
+        .def("__mul__", [](nb::handle, nb::handle) {
             throw std::runtime_error("mul(): please use the matrix "
                 "multiplication operator '@' instead.");
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform4f &a, const Transform4f &b) {
+        }, nb::is_operator())
+
+        // Transform concatenation
+        .def("__matmul__", [](const Transform &a, const Transform &b) {
             return a * b;
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform4f &a, const Point3f &b) {
+        }, nb::is_operator())
+
+        // Point transformation
+        .def("__matmul__", [](const Transform &a, const PointType &b) {
             return a * b;
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform4f &a, const Vector3f &b) {
+        }, nb::is_operator())
+
+        // Vector transformation
+        .def("__matmul__", [](const Transform &a, const VectorType &b) {
             return a * b;
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform4f &a, const Normal3f &b) {
+        }, nb::is_operator())
+
+        // Ray transformation
+        .def("__matmul__", [](const Transform &a, const RayType &b) {
             return a * b;
-        }, py::is_operator())
-        .def("__matmul__", [](const Transform4f &a, const Ray3f &b) {
+        }, nb::is_operator());
+
+    // Deprecated transform_affine methods with warnings
+    cls.def("transform_affine", [](const Transform &a, const PointType &b) {
+            transform_affine_is_deprecated_warning();
             return a * b;
-        }, py::is_operator())
-        .def("transform_affine", [](const Transform4f &a, const Point3f &b) {
-            return a.transform_affine(b);
         }, "p"_a, D(Transform, transform_affine))
-        .def("transform_affine", [](const Transform4f &a, const Ray3f &b) {
-            return a.transform_affine(b);
-        }, "ray"_a, D(Transform, transform_affine))
-        .def("transform_affine", [](const Transform4f &a, const Vector3f &b) {
-            return a.transform_affine(b);
+        .def("transform_affine", [](const Transform &a, const VectorType &b) {
+            transform_affine_is_deprecated_warning();
+            return a * b;
         }, "v"_a, D(Transform, transform_affine))
-        .def("transform_affine", [](const Transform4f &a, const Normal3f &b) {
-            return a.transform_affine(b);
-        }, "n"_a, D(Transform, transform_affine))
-        /// Fields
-        .def("inverse",   &Transform4f::inverse, D(Transform, inverse))
-        .def("has_scale", &Transform4f::has_scale, D(Transform, has_scale))
-        .def_readwrite("matrix", &Transform4f::matrix)
-        .def_readwrite("inverse_transpose", &Transform4f::inverse_transpose)
-        .def_repr(Transform4f);
+        .def("transform_affine", [](const Transform &a, const RayType &b) {
+            transform_affine_is_deprecated_warning();
+            return a * b;
+        }, "ray"_a, D(Transform, transform_affine));
 
-    if constexpr (dr::is_dynamic_v<Float>)
-        trans4.def(py::init<const ScalarTransform4f &>(), "Broadcast constructor");
+    if constexpr (Dimension == 4) {
+        // Normal transformation
+        cls.def("__matmul__", [](const Transform &a, const Normal3f &b) {
+            return a * b;
+        }, nb::is_operator());
 
-    MI_PY_DRJIT_STRUCT(trans4, Transform4f, matrix, inverse_transpose)
+        cls.def("transform_affine", [](const Transform &a, const Normal3f &b) {
+            transform_affine_is_deprecated_warning();
+            return a * b;
+        }, "n"_a, D(Transform, transform_affine));
+    }
 
-    std::string chain_name = std::string("Chain") + std::string(name);
-    py::class_<ChainTransform4f, Transform4f>(m, chain_name.c_str(), D(Transform))
-        .def("translate", [](const ChainTransform4f &t, const Point3f &v) {
-            return ChainTransform4f(t * Transform4f::translate(v));
+    // Chain transformations
+    cls.def("translate", [](const Transform &t, const VectorType &v) {
+            return Transform(t * Transform::translate(v));
         }, "v"_a, D(Transform, translate))
-        .def("scale", [](const ChainTransform4f &t, const Point3f &v) {
-            return ChainTransform4f(t * Transform4f::scale(v));
-        }, "v"_a, D(Transform, scale))
-        .def("rotate", [](const ChainTransform4f &t, const Point3f &v, const Float &a) {
-            return ChainTransform4f(t * Transform4f::rotate(v, a));
-        }, "axis"_a, "angle"_a, D(Transform, rotate))
-        .def("perspective", [](const ChainTransform4f &t, const Float &fov, const Float &near, const Float &far) {
-            return ChainTransform4f(t * Transform4f::template perspective<4>(fov, near, far));
-        }, "fov"_a, "near"_a, "far"_a, D(Transform, perspective))
-        .def("orthographic", [](const ChainTransform4f &t, const Float &near, const Float &far) {
-            return ChainTransform4f(t * Transform4f::orthographic(near, far));
-        }, "near"_a, "far"_a, D(Transform, orthographic))
-        .def("look_at", [](const ChainTransform4f &t, const Point3f &origin, const Point3f &target, const Point3f &up) {
-            return ChainTransform4f(t * Transform4f::template look_at<4>(origin, target, up));
-        }, "origin"_a, "target"_a, "up"_a, D(Transform, look_at))
-        .def("from_frame", [](const ChainTransform4f &t, const Frame3f &f) {
-            return ChainTransform4f(t * Transform4f::template from_frame<Float>(f));
-        }, "frame"_a, D(Transform, from_frame))
-        .def("to_frame", [](const ChainTransform4f &t, const Frame3f &f) {
-            return ChainTransform4f(t * Transform4f::template to_frame<Float>(f));
-        }, "frame"_a, D(Transform, to_frame));
+        .def("scale", [](const Transform &t, const VectorType &v) {
+            return Transform(t * Transform::scale(v));
+        }, "v"_a, D(Transform, scale));
 
-    py::implicitly_convertible<ChainTransform4f, Transform4f>();
+    // Rotation methods
+    if constexpr (Dimension == 3) {
+        cls.def("rotate", [](const Transform &t, const Float &a) {
+            return Transform(t * Transform::template rotate<3>(a));
+        }, "angle"_a, D(Transform, rotate, 2));
+    } else if constexpr (Dimension == 4) {
+        cls.def("rotate", [](const Transform &t, const VectorType &v, const Float &a) {
+            return Transform(t * Transform::rotate(v, a));
+        }, "axis"_a, "angle"_a, D(Transform, rotate));
+    }
+
+    // 4D-specific methods
+    if constexpr (Dimension == 4) {
+        cls.def("orthographic", [](const Transform &t, const Float &near, const Float &far) {
+                return Transform(t * Transform::orthographic(near, far));
+            }, "near"_a, "far"_a, D(Transform, orthographic))
+            .def("look_at", [](const Transform &t, const PointType &origin,
+                              const PointType &target, const VectorType &up) {
+                return Transform(t * Transform::template look_at<4>(origin, target, up));
+            }, "origin"_a, "target"_a, "up"_a, D(Transform, look_at))
+            .def("from_frame", [](const Transform &t, const Frame3f &f) {
+                return Transform(t * Transform::template from_frame<Float>(f));
+            }, "frame"_a, D(Transform, from_frame))
+            .def("to_frame", [](const Transform &t, const Frame3f &f) {
+                return Transform(t * Transform::template to_frame<Float>(f));
+            }, "frame"_a, D(Transform, to_frame));
+
+        // Add perspective method only for ProjectiveTransform4
+        if constexpr (IsProjective && Dimension == 4) {
+            cls.def("perspective", [](const Transform &t, Float fov, Float near, Float far) {
+                    return Transform(t * Transform::perspective(fov, near, far));
+                }, "fov"_a, "near"_a, "far"_a, D(Transform, perspective));
+        }
+
+    }
+
+    if constexpr (IsAffine)
+        cls.def("extract", [](const Transform &t) { return t.extract(); }, D(Transform, extract));
+
+    // Common methods
+    cls.def("inverse", &Transform::inverse, D(Transform, inverse))
+        .def("translation", &Transform::translation, D(Transform, translation))
+        .def("has_scale", &Transform::has_scale, D(Transform, has_scale))
+        .def_rw("matrix", &Transform::matrix)
+        .def_rw("inverse_transpose", &Transform::inverse_transpose)
+        .def_repr(Transform);
+
+    cls.def("update", &Transform::update, nb::rv_policy::reference,
+            "Update the inverse transpose part following a modification to 'matrix'");
+
+    // Dynamic variant constructor
+    if constexpr (dr::is_dynamic_v<Float>) {
+        using ScalarTransform = std::conditional_t<
+            IsAffine,
+            AffineTransform<ScalarPoint>,
+            ProjectiveTransform<ScalarPoint>
+        >;
+        cls.def(nb::init<const ScalarTransform &>(), "Broadcast constructor");
+    }
+
+    // Patch methods to be callable as Transform().f() and Transform.f()
+    nb::module_::import_("mitsuba.detail").attr("patch_transform")(cls);
+
+    nb::implicitly_convertible<MatrixType, Transform>();
+
+    MI_PY_DRJIT_STRUCT(cls, Transform, matrix, inverse_transpose)
 }
 
 MI_PY_EXPORT(Transform) {
     MI_PY_IMPORT_TYPES()
     using ScalarSpectrum = scalar_spectrum_t<Spectrum>;
 
-    MI_PY_CHECK_ALIAS(Transform3f, "Transform3f") {
-        bind_transform3<Float>(m, "Transform3f");
-    }
+    // Vectorized types
+    bind_transform<AffineTransform3f, Float, Spectrum, 3>(m, "AffineTransform3f");
+    bind_transform<AffineTransform3d, Float64, Spectrum, 3>(m, "AffineTransform3d");
+    bind_transform<AffineTransform4f, Float, Spectrum, 4>(m, "AffineTransform4f");
+    bind_transform<AffineTransform4d, Float64, Spectrum, 4>(m, "AffineTransform4d");
+    bind_transform<ProjectiveTransform3f, Float, Spectrum, 3>(m, "ProjectiveTransform3f");
+    bind_transform<ProjectiveTransform4f, Float, Spectrum, 4>(m, "ProjectiveTransform4f");
+    bind_transform<ProjectiveTransform3d, Float64, Spectrum, 3>(m, "ProjectiveTransform3d");
+    bind_transform<ProjectiveTransform4d, Float64, Spectrum, 4>(m, "ProjectiveTransform4d");
 
-    MI_PY_CHECK_ALIAS(Transform3d, "Transform3d") {
-        bind_transform3<Float64>(m, "Transform3d");
-    }
+    // Scalar types
+    bind_transform<ScalarAffineTransform3f, ScalarFloat, ScalarSpectrum, 3>(m, "ScalarAffineTransform3f");
+    bind_transform<ScalarAffineTransform3d, ScalarFloat64, ScalarSpectrum, 3>(m, "ScalarAffineTransform3d");
+    bind_transform<ScalarAffineTransform4f, ScalarFloat, ScalarSpectrum, 4>(m, "ScalarAffineTransform4f");
+    bind_transform<ScalarAffineTransform4d, ScalarFloat64, ScalarSpectrum, 4>(m, "ScalarAffineTransform4d");
+    bind_transform<ScalarProjectiveTransform3f, ScalarFloat, ScalarSpectrum, 3>(m, "ScalarProjectiveTransform3f");
+    bind_transform<ScalarProjectiveTransform3d, ScalarFloat64, ScalarSpectrum, 3>(m, "ScalarProjectiveTransform3d");
+    bind_transform<ScalarProjectiveTransform4f, ScalarFloat, ScalarSpectrum, 4>(m, "ScalarProjectiveTransform4f");
+    bind_transform<ScalarProjectiveTransform4d, ScalarFloat64, ScalarSpectrum, 4>(m, "ScalarProjectiveTransform4d");
 
-    MI_PY_CHECK_ALIAS(ScalarTransform3f, "ScalarTransform3f") {
-        if constexpr (dr::is_dynamic_v<Float>) {
-            bind_transform3<ScalarFloat>(m, "ScalarTransform3f");
-            py::implicitly_convertible<ScalarTransform3f, Transform3f>();
-        }
-    }
+    // Implicit conversions: scalar->vector
+    nb::implicitly_convertible<ScalarAffineTransform3f, AffineTransform3f>();
+    nb::implicitly_convertible<ScalarAffineTransform3d, AffineTransform3d>();
+    nb::implicitly_convertible<ScalarAffineTransform4f, AffineTransform4f>();
+    nb::implicitly_convertible<ScalarAffineTransform4d, AffineTransform4d>();
+    nb::implicitly_convertible<ScalarProjectiveTransform3f, ProjectiveTransform3f>();
+    nb::implicitly_convertible<ScalarProjectiveTransform3d, ProjectiveTransform3d>();
+    nb::implicitly_convertible<ScalarProjectiveTransform4f, ProjectiveTransform4f>();
+    nb::implicitly_convertible<ScalarProjectiveTransform4d, ProjectiveTransform4d>();
 
-    MI_PY_CHECK_ALIAS(ScalarTransform3d, "ScalarTransform3d") {
-        if constexpr (dr::is_dynamic_v<Float>) {
-            bind_transform3<ScalarFloat64>(m, "ScalarTransform3d");
-            py::implicitly_convertible<ScalarTransform3d, ScalarTransform3f>();
-        }
-    }
-
-    MI_PY_CHECK_ALIAS(Transform4f, "Transform4f") {
-        bind_transform4<Float, Spectrum>(m, "Transform4f");
-    }
-
-    MI_PY_CHECK_ALIAS(Transform4d, "Transform4d") {
-        bind_transform4<Float64, Spectrum>(m, "Transform4d");
-    }
-
-    MI_PY_CHECK_ALIAS(ScalarTransform4f, "ScalarTransform4f") {
-        if constexpr (dr::is_dynamic_v<Float>) {
-            bind_transform4<ScalarFloat, ScalarSpectrum>(m, "ScalarTransform4f");
-            py::implicitly_convertible<ScalarTransform4f, Transform4f>();
-        }
-    }
-
-    MI_PY_CHECK_ALIAS(ScalarTransform4d, "ScalarTransform4d") {
-        if constexpr (dr::is_dynamic_v<Float>) {
-            bind_transform4<ScalarFloat64, ScalarSpectrum>(m, "ScalarTransform4d");
-            py::implicitly_convertible<ScalarTransform4d, ScalarTransform4f>();
-        }
-    }
-
-    py::implicitly_convertible<py::array, Transform4f>();
-    py::implicitly_convertible<Matrix4f, Transform4f>();
+    // Create aliases for backward compatibility
+    m.attr("Transform3f") = m.attr("AffineTransform3f");
+    m.attr("Transform3d") = m.attr("AffineTransform3d");
+    m.attr("Transform4f") = m.attr("AffineTransform4f");
+    m.attr("Transform4d") = m.attr("AffineTransform4d");
+    m.attr("ScalarTransform3f") = m.attr("ScalarAffineTransform3f");
+    m.attr("ScalarTransform3d") = m.attr("ScalarAffineTransform3d");
+    m.attr("ScalarTransform4f") = m.attr("ScalarAffineTransform4f");
+    m.attr("ScalarTransform4d") = m.attr("ScalarAffineTransform4d");
 }
-
-#if 0
-MI_PY_EXPORT(AnimatedTransform) {
-    MI_PY_IMPORT_TYPES()
-    using Keyframe      = typename AnimatedTransform::Keyframe;
-    using _Float        = typename AnimatedTransform::Float;
-    using _Matrix3f     = typename AnimatedTransform::Matrix3f;
-    using _Quaternion4f = typename AnimatedTransform::Quaternion4f;
-    using _Vector3f     = typename AnimatedTransform::Vector3f;
-    using _Transform4f  = typename AnimatedTransform::Transform4f;
-
-    MI_PY_CHECK_ALIAS(AnimatedTransform, "AnimatedTransform") {
-        auto atrafo = MI_PY_CLASS(AnimatedTransform, Object);
-
-        py::class_<Keyframe>(atrafo, "Keyframe")
-            .def(py::init<float, _Matrix3f, _Quaternion4f, _Vector3f>())
-            .def_readwrite("time",  &Keyframe::time,  D(AnimatedTransform, Keyframe, time))
-            .def_readwrite("scale", &Keyframe::scale, D(AnimatedTransform, Keyframe, scale))
-            .def_readwrite("quat",  &Keyframe::quat,  D(AnimatedTransform, Keyframe, quat))
-            .def_readwrite("trans", &Keyframe::trans, D(AnimatedTransform, Keyframe, trans));
-
-        atrafo.def(py::init<>())
-            .def(py::init<const _Transform4f &>())
-            .def_method(AnimatedTransform, size)
-            .def_method(AnimatedTransform, has_scale)
-            .def("__len__", &AnimatedTransform::size)
-            .def("__getitem__", [](const AnimatedTransform &trafo, size_t index) {
-                if (index >= trafo.size())
-                    throw py::index_error();
-                return trafo[index];
-            })
-            .def("append",
-                py::overload_cast<_Float, const _Transform4f &>(&AnimatedTransform::append),
-                D(AnimatedTransform, append))
-            .def("append", py::overload_cast<const Keyframe &>( &AnimatedTransform::append))
-            .def("eval", &AnimatedTransform::template eval<Float>,
-                 "time"_a, "unused"_a = true, D(AnimatedTransform, eval))
-            .def_method(AnimatedTransform, translation_bounds);
-    }
-}
-#endif

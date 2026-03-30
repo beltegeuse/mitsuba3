@@ -4,19 +4,25 @@
 #include <drjit/morton.h>
 #include <bitset>
 #include <mitsuba/python/python.h>
+#include <mitsuba/core/spectrum.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/pair.h>
+
+#include <nanobind/stl/tuple.h>
 
 MI_PY_EXPORT(math) {
     MI_PY_IMPORT_TYPES()
 
-    m.attr("RayEpsilon")      = py::cast(math::RayEpsilon<Float>);
-    m.attr("ShadowEpsilon")   = py::cast(math::ShadowEpsilon<Float>);
+    m.attr("RayEpsilon")      = nb::cast(math::RayEpsilon<Float>);
+    m.attr("ShadowEpsilon")   = nb::cast(math::ShadowEpsilon<Float>);
+    m.attr("ShapeEpsilon")    = nb::cast(math::ShapeEpsilon<Float>);
 
     m.def("legendre_p",
-          py::overload_cast<int, Float>(math::legendre_p<Float>),
+          nb::overload_cast<int, Float>(math::legendre_p<Float>),
           "l"_a, "x"_a, D(math, legendre_p));
 
     m.def("legendre_p",
-          py::overload_cast<int, int, Float>(math::legendre_p<Float>),
+          nb::overload_cast<int, int, Float>(math::legendre_p<Float>),
           "l"_a, "m"_a, "x"_a, D(math, legendre_p));
 
     m.def("legendre_pd",
@@ -35,19 +41,58 @@ MI_PY_EXPORT(math) {
           D(math, round_to_power_of_two));
 
     m.def("linear_to_srgb",
+          [](ScalarFloat &c) { return dr::linear_to_srgb(c); },
+          "Applies the sRGB gamma curve to the given argument.");
+
+    m.def("linear_to_srgb",
+          [](ScalarColor3f &c) { return dr::linear_to_srgb(c); },
+          "Applies the sRGB gamma curve to the given argument.");
+
+    m.def("linear_to_srgb",
           [](Float &c) { return dr::linear_to_srgb(c); },
           "Applies the sRGB gamma curve to the given argument.");
+
+    m.def("linear_to_srgb",
+          [](Color3f &c) { return dr::linear_to_srgb(c); },
+          "Applies the sRGB gamma curve to the given argument.");
+
+    m.def("srgb_to_linear",
+          [](ScalarFloat &c) { return dr::srgb_to_linear(c); },
+          "Applies the inverse sRGB gamma curve to the given argument.");
+
+    m.def("srgb_to_linear",
+          [](ScalarColor3f &c) { return dr::srgb_to_linear(c); },
+          "Applies the inverse sRGB gamma curve to the given argument.");
 
     m.def("srgb_to_linear",
           [](Float &c) { return dr::srgb_to_linear(c); },
           "Applies the inverse sRGB gamma curve to the given argument.");
 
-    m.def("chi2",
-          [](const DynamicBuffer<double> &obs, const DynamicBuffer<double> &exp, double thresh) {
-              if (exp.size() != obs.size())
-                  throw std::runtime_error("Unsupported input dimensions");
-              return math::chi2(obs.data(), exp.data(), thresh, obs.size());
-          }, D(math, chi2));
+    m.def("srgb_to_linear",
+          [](Color3f &c) { return dr::srgb_to_linear(c); },
+          "Applies the inverse sRGB gamma curve to the given argument.");
+
+    m.def(
+        "chi2",
+        [](const DynamicBuffer<Float64> &obs_,
+           const DynamicBuffer<Float64> &exp_, double thresh) {
+            if (exp_.size() != obs_.size())
+                throw std::runtime_error("Unsupported input dimensions");
+
+            DynamicBuffer<double> obs = dr::zeros<DynamicBuffer<double>>(exp_.size());
+            DynamicBuffer<double> exp = dr::zeros<DynamicBuffer<double>>(exp_.size());
+            if constexpr(dr::is_jit_v<DynamicBuffer<Float64>>) {
+                dr::eval(obs_, exp_);
+                dr::store(obs.data(), obs_);
+                dr::store(exp.data(), exp_);
+            } else {
+                obs = obs_;
+                exp = exp_;
+            }
+
+            return math::chi2(obs.data(), exp.data(), thresh, obs.size());
+        },
+        D(math, chi2));
 
     m.def("solve_quadratic",
           &math::solve_quadratic<Float>,

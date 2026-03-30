@@ -99,6 +99,8 @@ here as a user parameter `alpha_sample` and should be set according to the
 approximate roughness of the material to be rendered. Note that any value here
 will result in a correct rendering but the level of noise can vary significantly.
 
+.. warning::
+    This BSDF is only supported in ``*_spectral_polarized`` variants.
 */
 template <typename Float, typename Spectrum>
 class MeasuredPolarized final : public BSDF<Float, Spectrum> {
@@ -118,8 +120,8 @@ public:
         if (!is_spectral_v<Spectrum> && m_wavelength == -1.f)
             Throw("In non-spectral modes, the measured polarized plugin can only render a specific wavelength specified by the `wavelength` parameter.");
 
-        auto fs = Thread::thread()->file_resolver();
-        fs::path file_path = fs->resolve(props.string("filename"));
+        auto fs = file_resolver();
+        fs::path file_path = fs->resolve(props.get<std::string_view>("filename"));
         m_name = file_path.filename().string();
 
         ref<TensorFile> tf = new TensorFile(file_path);
@@ -183,7 +185,7 @@ public:
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
         active &= cos_theta_i > 0.f;
 
-        BSDFSample3f bs;
+        BSDFSample3f bs = dr::zeros<BSDFSample3f>();
         if (unlikely(dr::none_or<false>(active) || !ctx.is_enabled(BSDFFlags::GlossyReflection)))
             return { bs, 0.f };
 
@@ -256,7 +258,7 @@ public:
                 for (int i = 0; i < 4; ++i) {
                     for (int j = 0; j < 4; ++j) {
                         UnpolarizedSpectrum tmp(0.f);
-                        for (size_t k = 0; k < dr::array_size_v<UnpolarizedSpectrum>; ++k) {
+                        for (size_t k = 0; k < dr::size_v<UnpolarizedSpectrum>; ++k) {
                             Float params[4] = {
                                 phi_d, theta_d, theta_h,
                                 si.wavelengths[k]
@@ -296,7 +298,7 @@ public:
                                                    wi_hat, xi_hat, mueller::stokes_basis(wi_hat));
         } else {
             if (m_wavelength == -1.f) {
-                for (size_t k = 0; k < dr::array_size_v<UnpolarizedSpectrum>; ++k) {
+                for (size_t k = 0; k < dr::size_v<UnpolarizedSpectrum>; ++k) {
                     Float params[4] = {
                         phi_d, theta_d, theta_h,
                         si.wavelengths[k]
@@ -382,22 +384,23 @@ private:
               th = dr::safe_acos(dr::dot(n, h));
 
         Vector3 i_prj = dr::normalize(i - dr::dot(i, h)*h);
-        Value cos_phi_d = dr::clamp(dr::dot(t, i_prj), -1.f, 1.f),
-              sin_phi_d = dr::clamp(dr::dot(b, i_prj), -1.f, 1.f);
+        Value cos_phi_d = dr::clip(dr::dot(t, i_prj), -1.f, 1.f),
+              sin_phi_d = dr::clip(dr::dot(b, i_prj), -1.f, 1.f);
 
         Value pd = dr::atan2(sin_phi_d, cos_phi_d);
 
         return std::make_tuple(pd, th, td);
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(MeasuredPolarized)
 private:
     std::string m_name;
     ScalarFloat m_wavelength;
     ScalarFloat m_alpha_sample;
     Interpolator  m_interpolator;
+
+    MI_TRAVERSE_CB(Base, m_interpolator)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(MeasuredPolarized, BSDF)
-MI_EXPORT_PLUGIN(MeasuredPolarized, "Measured polarized material")
+MI_EXPORT_PLUGIN(MeasuredPolarized)
 NAMESPACE_END(mitsuba)

@@ -79,13 +79,13 @@ public:
     void set_sample_count(uint32_t spp) override {
         // Make sure sample_count is a square number
         m_resolution = 1;
-        while (dr::sqr(m_resolution) < spp)
+        while (dr::square(m_resolution) < spp)
             m_resolution++;
 
-        if (spp != dr::sqr(m_resolution))
-            Log(Warn, "Sample count should be square and power of two, rounding to %i", dr::sqr(m_resolution));
+        if (spp != dr::square(m_resolution))
+            Log(Warn, "Sample count should be square and power of two, rounding to %i", dr::square(m_resolution));
 
-        m_sample_count = dr::sqr(m_resolution);
+        m_sample_count = dr::square(m_resolution);
         m_inv_sample_count = dr::rcp(ScalarFloat(m_sample_count));
         m_inv_resolution   = dr::rcp(ScalarFloat(m_resolution));
         m_resolution_div = m_resolution;
@@ -108,7 +108,7 @@ public:
         return new StratifiedSampler(*this);
     }
 
-    void seed(uint32_t seed, uint32_t wavefront_size) override {
+    void seed(UInt32 seed, uint32_t wavefront_size) override {
         Base::seed(seed, wavefront_size);
         m_permutation_seed = compute_per_sequence_seed(seed);
     }
@@ -166,7 +166,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(StratifiedSampler)
 
 private:
     StratifiedSampler(const StratifiedSampler &sampler) : Base(sampler) {
@@ -188,8 +188,44 @@ private:
 
     /// Per-sequence permutation seed
     UInt32 m_permutation_seed;
+
+public:
+    void
+    traverse_1_cb_ro(void *payload,
+                     drjit ::detail ::traverse_callback_ro fn) const override {
+        /**
+         * Traversing the field \c m_sample_index for loop state variables,
+         * causes the loop to be re-traced. This incurs significant overhead.
+         * Therefore we gate traversal of the sampler base class behind the
+         * \c JitFlag::EnableObjectTraversal, and otherwise handle
+         * \c m_dimension_index and \c m_rng separately.
+         */
+        if (jit_flag(JitFlag::EnableObjectTraversal)) {
+            Base::traverse_1_cb_ro(payload, fn);
+        } else {
+            drjit::traverse_1_fn_ro(m_rng, payload, fn);
+            drjit::traverse_1_fn_ro(m_dimension_index, payload, fn);
+        }
+        drjit::traverse_1_fn_ro(m_permutation_seed, payload, fn);
+    }
+    void traverse_1_cb_rw(void *payload,
+                          drjit ::detail ::traverse_callback_rw fn) override {
+        /**
+         * Traversing the field \c m_sample_index for loop state variables,
+         * causes the loop to be re-traced. This incurs significant overhead.
+         * Therefore we gate traversal of the sampler base class behind the
+         * \c JitFlag::EnableObjectTraversal, and otherwise handle
+         * \c m_dimension_index and \c m_rng separately.
+         */
+        if (jit_flag(JitFlag::EnableObjectTraversal)) {
+            Base::traverse_1_cb_rw(payload, fn);
+        } else {
+            drjit::traverse_1_fn_rw(m_rng, payload, fn);
+            drjit::traverse_1_fn_rw(m_dimension_index, payload, fn);
+        }
+        drjit::traverse_1_fn_rw(m_permutation_seed, payload, fn);
+    }
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(StratifiedSampler, Sampler)
-MI_EXPORT_PLUGIN(StratifiedSampler, "Stratified Sampler");
+MI_EXPORT_PLUGIN(StratifiedSampler)
 NAMESPACE_END(mitsuba)

@@ -27,13 +27,14 @@ def test02_create_multiple_curves(variants_all_rgb):
 
 @fresolver_append_path
 def test02_bbox(variants_all_rgb):
+    T = mi.ScalarTransform4f
     for sx in [1, 2, 4]:
         for translate in [mi.ScalarVector3f([1.3, -3.0, 5]),
                           mi.ScalarVector3f([-10000, 3.0, 31])]:
             s = mi.load_dict({
                 "type" : "linearcurve",
                 "filename" : "resources/data/common/meshes/curve.txt",
-                "to_world" : mi.ScalarTransform4f.translate(translate) @ mi.ScalarTransform4f.scale((sx, 1, 1))
+                "to_world" : T().translate(translate) @ T().scale((sx, 1, 1))
             })
             b = s.bbox()
 
@@ -78,7 +79,7 @@ def test04_ray_intersect(variant_scalar_rgb):
             "foo" : {
                 "type" : "linearcurve",
                 "filename" : "resources/data/common/meshes/curve.txt",
-                "to_world" : mi.Transform4f.translate(translate).scale(10)
+                "to_world" : mi.Transform4f().translate(translate).scale(10)
             }
         })
 
@@ -120,6 +121,7 @@ def test04_ray_intersect(variant_scalar_rgb):
                         assert dr.allclose(dn_dv, si.dn_dv, atol=2e-2)
 
 
+@fresolver_append_path
 def test05_ray_intersect_vec(variant_scalar_rgb):
     from mitsuba.scalar_rgb.test.util import check_vectorization
 
@@ -127,8 +129,8 @@ def test05_ray_intersect_vec(variant_scalar_rgb):
         scene = mi.load_dict({
             "type" : "scene",
             "foo" : {
-                "type" : "disk",
-                "to_world" : mi.ScalarTransform4f.scale((2.0, 0.5, 1.0))
+                "type" : "linearcurve",
+                "filename" : "resources/data/common/meshes/curve.txt",
             }
         })
 
@@ -144,6 +146,7 @@ def test05_ray_intersect_vec(variant_scalar_rgb):
 
 @fresolver_append_path
 def test08_instancing(variants_all_rgb):
+    T = mi.ScalarTransform4f
     scene = mi.load_dict({
         "type" : "scene",
         "group": {
@@ -155,7 +158,7 @@ def test08_instancing(variants_all_rgb):
         },
         "instance1": {
             "type" : "instance",
-            "to_world": mi.ScalarTransform4f.translate([0, -2, 0]),
+            "to_world": T().translate([0, -2, 0]),
             "shapegroup": {
                 "type": "ref",
                 "id": "group"
@@ -163,7 +166,7 @@ def test08_instancing(variants_all_rgb):
         },
         "instance2": {
             "type" : "instance",
-            "to_world": mi.ScalarTransform4f.translate([0, 2, 0]),
+            "to_world": T().translate([0, 2, 0]),
             "shapegroup": {
                 "type": "ref",
                 "id": "group"
@@ -179,3 +182,33 @@ def test08_instancing(variants_all_rgb):
 
     assert dr.all(pi1.is_valid())
     assert dr.all(pi2.is_valid())
+
+
+@fresolver_append_path
+def test09_backface_culling(variants_vec_rgb):
+    scene =  mi.load_dict({
+        "type" : "scene",
+        "foo" : {
+            "type" : "linearcurve",
+            "filename" : "resources/data/common/meshes/curve.txt",
+        }
+    })
+
+    # Ray inside the curve
+    ray = mi.Ray3f(o=[0, 0, 0], d=[0, 0, -1])
+    si = scene.ray_intersect(ray)
+    assert dr.all(~si.is_valid())
+
+    # Ray outside the curve
+    ray = mi.Ray3f(o=[0, 0, 2], d=[0, 0, -1])
+    si = scene.ray_intersect(ray)
+    assert dr.all(si.is_valid())
+
+
+@fresolver_append_path
+def test10_shape_type(variant_scalar_rgb):
+    curve = mi.load_dict({
+        "type" : "linearcurve",
+        "filename" : "resources/data/common/meshes/curve_6.txt",
+    })
+    assert curve.shape_type() == mi.ShapeType.LinearCurve.value;

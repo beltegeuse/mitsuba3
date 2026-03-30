@@ -10,15 +10,18 @@
 #include <unordered_map>
 #include <mutex>
 #include <drjit/dynamic.h>
+#include <drjit/array_traverse.h>
 
 NAMESPACE_BEGIN(mitsuba)
 
 template <typename Float, typename Spectrum>
 class MI_EXPORT_LIB Mesh : public Shape<Float, Spectrum> {
 public:
-    MI_IMPORT_TYPES()
+    MI_IMPORT_TYPES(BSDF)
     MI_IMPORT_BASE(Shape, m_to_world, mark_dirty, m_emitter, m_sensor, m_bsdf,
-                   m_interior_medium, m_exterior_medium, m_is_instance)
+                   m_interior_medium, m_exterior_medium, m_is_instance,
+                   m_discontinuity_types, m_shape_type, m_initialized,
+                   get_children_string)
 
     // Mesh is always stored in single precision
     using InputFloat = float;
@@ -31,18 +34,40 @@ public:
 
     using typename Base::ScalarSize;
     using typename Base::ScalarIndex;
+    using typename Base::Index;
 
-    /// Create a new mesh with the given vertex and face data structures
+    /** \brief Creates a zero-initialized mesh with the given vertex and face
+     * counts
+     *
+     * The vertex and face buffers can be filled using the ``mi.traverse``
+     * mechanism. When initializing these buffers through another method, an
+     * explicit call to \ref initialize must be made once all buffers are
+     * filled.
+     */
     Mesh(const std::string &name, ScalarSize vertex_count,
          ScalarSize face_count, const Properties &props = Properties(),
          bool has_vertex_normals = false, bool has_vertex_texcoords = false);
 
-    /// Must be called at the end of the constructor of Mesh plugins
+    // Creates an empty mesh.
+    Mesh(const Properties &props);
+
+    /// Destructor
+    ~Mesh();
+
+    /** \brief Must be called once at the end of the construction of a Mesh
+     *
+     * This method computes internal data structures and notifies the parent
+     * sensor or emitter (if there is one) that this instance is their internal
+     * shape.
+     */
     void initialize() override;
 
     // =========================================================================
     //! @{ \name Accessors (vertices, faces, normals, etc)
     // =========================================================================
+
+    /// Set the shape's BSDF
+    void set_bsdf(BSDF *bsdf) override;
 
     /// Return the total number of vertices
     ScalarSize vertex_count() const { return m_vertex_count; }
@@ -70,23 +95,41 @@ public:
     const DynamicBuffer<UInt32>& faces_buffer() const { return m_faces; }
 
     /// Return the mesh attribute associated with \c name
-    FloatStorage& attribute_buffer(const std::string& name) {
-        auto attribute = m_mesh_attributes.find(name);
-        if (attribute == m_mesh_attributes.end())
-            Throw("attribute_buffer(): attribute %s doesn't exist.", name.c_str());
-        return attribute->second.buf;
-    }
+    FloatStorage& attribute_buffer(std::string_view name);
 
     /// Add an attribute buffer with the given \c name and \c dim
-    void add_attribute(const std::string &name, size_t dim,
+    void add_attribute(std::string_view name, size_t dim,
                        const std::vector<InputFloat> &buf);
 
-    /// Returns the face indices associated with triangle \c index
+    /**
+     * Remove an attribute with the given \c name.
+     *
+     * Affects both mesh and texture attributes.
+     *
+     * Throws an exception if the attribute was not previously registered.
+     */
+    void remove_attribute(std::string_view name) override;
+
+    /// Returns the vertex indices associated with triangle \c index
     template <typename Index>
     MI_INLINE auto face_indices(Index index,
                                 dr::mask_t<Index> active = true) const {
         using Result = dr::Array<dr::uint32_array_t<Index>, 3>;
         return dr::gather<Result>(m_faces, index, active);
+    }
+
+    /**
+     * Returns the vertex indices associated with edge \c edge_index (0..2)
+     * of triangle \c tri_index.
+     */
+    template <typename Index>
+    MI_INLINE auto edge_indices(Index tri_index, Index edge_index,
+                                dr::mask_t<Index> active = true) const {
+        using UInt32 = dr::uint32_array_t<Index>;
+        return dr::Array<UInt32, 2>(
+            dr::gather<UInt32>(m_faces, 3 * tri_index + edge_index, active),
+            dr::gather<UInt32>(m_faces, 3 * tri_index + (edge_index + 1) % 3, active)
+        );
     }
 
     /// Returns the world-space position of the vertex with index \c index
@@ -113,6 +156,36 @@ public:
         return dr::gather<Result>(m_vertex_texcoords, index, active);
     }
 
+    /// Returns the normal direction of the face with index \c index
+    template <typename Index>
+    MI_INLINE auto face_normal(Index index,
+                               dr::mask_t<Index> active = true) const {
+        Vector3u vertex_indices = face_indices(index, active);
+        Vector3f v[3] = { vertex_position(vertex_indices[0], active),
+                          vertex_position(vertex_indices[1], active),
+                          vertex_position(vertex_indices[2], active) };
+
+        return dr::normalize(dr::cross(v[1] - v[0], v[2] - v[0]));
+    }
+
+    /**
+     * Returns the opposite edge index associated with directed edge \c index
+     *
+     * If the directed edge data structure is not initialized or outdated,
+     * the return value is undefined. Ensure that \ref build_directed_edges()
+     * is called before this method.
+     */
+    template <typename Index>
+    MI_INLINE auto opposite_dedge(Index index,
+                                 dr::mask_t<Index> active = true) const {
+        using Result = dr::uint32_array_t<Index>;
+
+        if (dr::width(m_E2E) == 0)
+            return Result((uint32_t) -1);
+
+        return dr::gather<Result>(m_E2E, index, active);
+    }
+
     /// Does this mesh have per-vertex normals?
     bool has_vertex_normals() const { return dr::width(m_vertex_normals) != 0; }
 
@@ -124,6 +197,9 @@ public:
 
     /// Does this mesh use face normals?
     bool has_face_normals() const { return m_face_normals; }
+
+    /// Does this shape have flipped normals?
+    bool has_flipped_normals() const override { return m_flip_normals; }
 
     /// @}
     // =========================================================================
@@ -153,53 +229,92 @@ public:
     /// Recompute the bounding box (e.g. after modifying the vertex positions)
     void recompute_bbox();
 
+    /**
+     * \brief Build directed edge data structure to efficiently access adjacent
+     * edges.
+     *
+     * This is an implementation of the technique described in:
+     * <tt>https://www.graphics.rwth-aachen.de/media/papers/directed.pdf</tt>.
+     */
+    void build_directed_edges();
+
     // =============================================================
     //! @{ \name Shape interface implementation
     // =============================================================
 
-    virtual ScalarBoundingBox3f bbox() const override;
+    ScalarBoundingBox3f bbox() const override;
 
-    virtual ScalarBoundingBox3f bbox(ScalarIndex index) const override;
+    ScalarBoundingBox3f bbox(ScalarIndex index) const override;
 
-    virtual ScalarBoundingBox3f bbox(ScalarIndex index,
-                                     const ScalarBoundingBox3f &clip) const override;
+    ScalarBoundingBox3f bbox(ScalarIndex index,
+                             const ScalarBoundingBox3f &clip) const override;
 
-    virtual ScalarSize primitive_count() const override;
+    ScalarSize primitive_count() const override;
 
-    virtual Float surface_area() const override;
+    Float surface_area() const override;
 
-    virtual PositionSample3f sample_position(Float time, const Point2f &sample,
-                                             Mask active = true) const override;
-
-    virtual Float pdf_position(const PositionSample3f &ps, Mask active = true) const override;
-
-    virtual Point3f
-    barycentric_coordinates(const SurfaceInteraction3f &si,
-                            Mask active = true) const;
-
-    virtual SurfaceInteraction3f compute_surface_interaction(const Ray3f &ray,
-                                                             const PreliminaryIntersection3f &pi,
-                                                             uint32_t ray_flags,
-                                                             uint32_t recursion_depth = 0,
-                                                             Mask active = true) const override;
-
-    virtual Mask has_attribute(const std::string &name, Mask active = true) const override;
-
-    virtual UnpolarizedSpectrum eval_attribute(const std::string &name,
-                                               const SurfaceInteraction3f &si,
-                                               Mask active = true) const override;
-    virtual Float eval_attribute_1(const std::string& name,
-                                   const SurfaceInteraction3f &si,
-                                   Mask active = true) const override;
-    virtual Color3f eval_attribute_3(const std::string& name,
-                                     const SurfaceInteraction3f &si,
+    PositionSample3f sample_position(Float time,
+                                     const Point2f &sample,
                                      Mask active = true) const override;
 
-    virtual SurfaceInteraction3f eval_parameterization(const Point2f &uv,
-                                                       uint32_t ray_flags = +RayFlags::All,
-                                                       Mask active = true) const override;
+    Float pdf_position(const PositionSample3f &ps, Mask active = true) const override;
+
+    Point3f barycentric_coordinates(const SurfaceInteraction3f &si,
+                                    Mask active = true) const;
+
+    SurfaceInteraction3f compute_surface_interaction(const Ray3f &ray,
+                                                     const PreliminaryIntersection3f &pi,
+                                                     uint32_t ray_flags,
+                                                     uint32_t recursion_depth = 0,
+                                                     Mask active = true) const override;
+
+    Mask has_attribute(std::string_view name, Mask active = true) const override;
+
+    UnpolarizedSpectrum eval_attribute(std::string_view name,
+                                       const SurfaceInteraction3f &si,
+                                       Mask active = true) const override;
+
+    Float eval_attribute_1(std::string_view name,
+                           const SurfaceInteraction3f &si,
+                           Mask active = true) const override;
+
+    Color3f eval_attribute_3(std::string_view name,
+                             const SurfaceInteraction3f &si,
+                             Mask active = true) const override;
+
+    SurfaceInteraction3f eval_parameterization(const Point2f &uv,
+                                               uint32_t ray_flags = +RayFlags::All,
+                                               Mask active = true) const override;
 
     void set_scene(Scene<Float, Spectrum> *scene) { m_scene = scene; }
+
+    SilhouetteSample3f sample_silhouette(const Point3f &sample,
+                                         uint32_t flags,
+                                         Mask active) const override;
+
+    Point3f invert_silhouette_sample(const SilhouetteSample3f &ss,
+                                     Mask active) const override;
+
+    Point3f differential_motion(const SurfaceInteraction3f &si,
+                                Mask active = true) const override;
+
+    SilhouetteSample3f primitive_silhouette_projection(const Point3f &viewpoint,
+                                                       const SurfaceInteraction3f &si,
+                                                       uint32_t flags,
+                                                       Float sample,
+                                                       Mask active = true) const override;
+
+    std::tuple<DynamicBuffer<UInt32>, DynamicBuffer<Float>>
+    precompute_silhouette(const ScalarPoint3f &viewpoint) const override;
+
+    SilhouetteSample3f sample_precomputed_silhouette(const Point3f &viewpoint,
+                                                     Index sample1,
+                                                     Float sample2,
+                                                     Mask active = true) const override;
+
+    //! @}
+    // =============================================================
+
 
     /** \brief Ray-triangle intersection test
      *
@@ -283,13 +398,13 @@ public:
 
 #if defined(MI_ENABLE_EMBREE)
     /// Return the Embree version of this shape
-    virtual RTCGeometry embree_geometry(RTCDevice device) override;
+    RTCGeometry embree_geometry(RTCDevice device) override;
 #endif
 
 #if defined(MI_ENABLE_CUDA)
     using Base::m_optix_data_ptr;
-    virtual void optix_prepare_geometry() override;
-    virtual void optix_build_input(OptixBuildInput&) const override;
+    void optix_prepare_geometry() override;
+    void optix_build_input(OptixBuildInput&) const override;
 #endif
 
     /// @}
@@ -300,15 +415,13 @@ public:
     bool parameters_grad_enabled() const override;
 
     /// Return a human-readable string representation of the shape contents.
-    virtual std::string to_string() const override;
+    std::string to_string() const override;
 
     size_t vertex_data_bytes() const;
     size_t face_data_bytes() const;
 
 protected:
-    Mesh(const Properties &);
     inline Mesh() {}
-    virtual ~Mesh();
 
     /**
      * \brief Build internal tables for sampling uniformly wrt. area.
@@ -317,6 +430,18 @@ protected:
      * Thread-safe, since it uses a mutex.
      */
     void build_pmf();
+
+    /**
+     * \brief Precompute the set of edges that could contribute to the indirect
+     * discontinuous integral.
+     *
+     * This method filters out any concave edges or flat surfaces.
+     *
+     * Internally, this method relies on the directed edge data structure. A
+     * call to \ref build_directed_edges before a call to this method is
+     * therefore necessary.
+     */
+    void build_indirect_silhouette_distribution();
 
     /**
      * \brief Initialize the \c m_parameterization field for mapping UV
@@ -379,7 +504,7 @@ protected:
         return { t, { u, v }, active };
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(Mesh)
 
 protected:
     enum MeshAttributeType {
@@ -394,6 +519,8 @@ protected:
         MeshAttribute migrate(AllocType at) const {
             return MeshAttribute { size, type, dr::migrate(buf, at) };
         }
+
+        DRJIT_STRUCT_NODEF(MeshAttribute, buf);
     };
 
     template <uint32_t Size, bool Raw>
@@ -453,6 +580,13 @@ protected:
 
     mutable DynamicBuffer<UInt32> m_faces;
 
+    /// Directed edges data structures to support neighbor queries
+    mutable DynamicBuffer<UInt32> m_E2E;
+    bool m_E2E_outdated = true;
+
+    /// Sampling density of silhouette (\ref build_indirect_silhouette_distribution)
+    DiscreteDistribution<Float> m_sil_dedge_pmf;
+
 #if defined(MI_ENABLE_LLVM) && !defined(MI_ENABLE_EMBREE)
     /* Data pointer to ensure triangle intersection routine doesn't rely on
        drjit-core when called from an LLVM kernel */
@@ -460,7 +594,8 @@ protected:
     uint32_t* m_faces_ptr;
 #endif
 
-    std::unordered_map<std::string, MeshAttribute> m_mesh_attributes;
+    tsl::robin_map<std::string, MeshAttribute, std::hash<std::string_view>,
+                   std::equal_to<>> m_mesh_attributes;
 
 #if defined(MI_ENABLE_CUDA)
     mutable void* m_vertex_buffer_ptr = nullptr;
@@ -480,7 +615,37 @@ protected:
 
     /// Pointer to the scene that owns this mesh
     Scene<Float, Spectrum>* m_scene = nullptr;
+
+    MI_DECLARE_TRAVERSE_CB(m_vertex_positions, m_vertex_normals,
+                           m_vertex_texcoords, m_faces, m_E2E, m_sil_dedge_pmf,
+                           m_mesh_attributes, m_area_pmf, m_parameterization)
 };
 
 MI_EXTERN_CLASS(Mesh)
 NAMESPACE_END(mitsuba)
+
+
+// -----------------------------------------------------------------------
+//! @{ \name Dr.Jit support for vectorized function calls
+// -----------------------------------------------------------------------
+
+DRJIT_CALL_TEMPLATE_INHERITED_BEGIN(mitsuba::Mesh, mitsuba::Shape)
+    DRJIT_CALL_METHOD(face_indices)
+    DRJIT_CALL_METHOD(edge_indices)
+    DRJIT_CALL_METHOD(vertex_position)
+    DRJIT_CALL_METHOD(vertex_normal)
+    DRJIT_CALL_METHOD(vertex_texcoord)
+    DRJIT_CALL_METHOD(face_normal)
+    DRJIT_CALL_METHOD(opposite_dedge)
+    DRJIT_CALL_METHOD(ray_intersect_triangle)
+
+    DRJIT_CALL_GETTER(vertex_count)
+    DRJIT_CALL_GETTER(face_count)
+    DRJIT_CALL_GETTER(has_vertex_normals)
+    DRJIT_CALL_GETTER(has_vertex_texcoords)
+    DRJIT_CALL_GETTER(has_mesh_attributes)
+    DRJIT_CALL_GETTER(has_face_normals)
+DRJIT_CALL_END()
+
+//! @}
+// -----------------------------------------------------------------------

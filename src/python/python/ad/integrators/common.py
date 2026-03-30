@@ -25,7 +25,7 @@ class ADIntegrator(mi.CppADIntegrator):
          visible surfaces. (Default: 5)
     """
 
-    def __init__(self, props = mi.Properties()):
+    def __init__(self, props):
         super().__init__(props)
 
         max_depth = props.get('max_depth', 6)
@@ -39,12 +39,6 @@ class ADIntegrator(mi.CppADIntegrator):
         if self.rr_depth <= 0:
             raise Exception("\"rr_depth\" must be set to a value greater than zero!")
 
-        # Warn about potential bias due to shapes entering/leaving the frame
-        self.sample_border_warning = True
-
-    def aovs(self):
-        return []
-
     def to_string(self):
         return f'{type(self).__name__}[max_depth = {self.max_depth},' \
                f' rr_depth = { self.rr_depth }]'
@@ -52,11 +46,10 @@ class ADIntegrator(mi.CppADIntegrator):
     def render(self: mi.SamplingIntegrator,
                scene: mi.Scene,
                sensor: Union[int, mi.Sensor] = 0,
-               seed: int = 0,
+               seed: mi.UInt32 = 0,
                spp: int = 0,
                develop: bool = True,
                evaluate: bool = True) -> mi.TensorXf:
-
         if not develop:
             raise Exception("develop=True must be specified when "
                             "invoking AD integrators")
@@ -73,22 +66,22 @@ class ADIntegrator(mi.CppADIntegrator):
                 sensor=sensor,
                 seed=seed,
                 spp=spp,
-                aovs=self.aovs()
+                aovs=self.aov_names()
             )
 
             # Generate a set of rays starting at the sensor
-            ray, weight, pos, _ = self.sample_rays(scene, sensor, sampler)
+            ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             # Launch the Monte Carlo sampling process in primal mode
-            L, valid, state = self.sample(
+            L, valid, aovs, _ = self.sample(
                 mode=dr.ADMode.Primal,
                 scene=scene,
                 sampler=sampler,
                 ray=ray,
                 depth=mi.UInt32(0),
                 δL=None,
+                δaovs=None,
                 state_in=None,
-                reparam=None,
                 active=mi.Bool(True)
             )
 
@@ -104,63 +97,45 @@ class ADIntegrator(mi.CppADIntegrator):
                 value=L * weight,
                 weight=1.0,
                 alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
+                aovs=aovs,
                 wavelengths=ray.wavelengths
             )
 
             # Explicitly delete any remaining unused variables
             del sampler, ray, weight, pos, L, valid
-            gc.collect()
 
             # Perform the weight division and return an image tensor
             film.put_block(block)
-            self.primal_image = film.develop()
 
-            return self.primal_image
+            return film.develop()
 
     def render_forward(self: mi.SamplingIntegrator,
                        scene: mi.Scene,
                        params: Any,
                        sensor: Union[int, mi.Sensor] = 0,
-                       seed: int = 0,
+                       seed: mi.UInt32 = 0,
                        spp: int = 0) -> mi.TensorXf:
 
         if isinstance(sensor, int):
             sensor = scene.sensors()[sensor]
 
         film = sensor.film()
-        aovs = self.aovs()
 
         # Disable derivatives in all of the following
         with dr.suspend_grad():
             # Prepare the film and sample generator for rendering
-            sampler, spp = self.prepare(sensor, seed, spp, aovs)
-
-            # When the underlying integrator supports reparameterizations,
-            # perform necessary initialization steps and wrap the result using
-            # the _ReparamWrapper abstraction defined above
-            if hasattr(self, 'reparam'):
-                reparam = _ReparamWrapper(
-                    scene=scene,
-                    params=params,
-                    reparam=self.reparam,
-                    wavefront_size=sampler.wavefront_size(),
-                    seed=seed
-                )
-            else:
-                reparam = None
+            sampler, spp = self.prepare(sensor, seed, spp, self.aov_names())
 
             # Generate a set of rays starting at the sensor, keep track of
             # derivatives wrt. sample positions ('pos') if there are any
-            ray, weight, pos, det = self.sample_rays(scene, sensor,
-                                                     sampler, reparam)
+            ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             with dr.resume_grad():
-                L, valid, _ = self.sample(
+                L, valid, aovs, _ = self.sample(
                     mode=dr.ADMode.Forward,
                     scene=scene,
                     sampler=sampler,
                     ray=ray,
-                    reparam=reparam,
                     active=mi.Bool(True)
                 )
 
@@ -168,23 +143,20 @@ class ADIntegrator(mi.CppADIntegrator):
                 # Only use the coalescing feature when rendering enough samples
                 block.set_coalesce(block.coalesce() and spp >= 4)
 
-                # Deposit samples with gradient tracking for 'pos'.
-                # After reparameterizing the camera ray, we need to evaluate
-                #   Σ (fi Li det)
-                #  ---------------
-                #   Σ (fi det)
                 ADIntegrator._splat_to_block(
                     block, film, pos,
-                    value=L * weight * det,
-                    weight=det,
+                    value=L * weight,
+                    weight=1,
                     alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
+                    aovs=aovs,
                     wavelengths=ray.wavelengths
                 )
 
-                # Perform the weight division and return an image tensor
+                # Perform the weight division
                 film.put_block(block)
                 result_img = film.develop()
 
+                # Propagate the gradients to the image tensor
                 dr.forward_to(result_img)
 
         return dr.grad(result_img)
@@ -194,46 +166,29 @@ class ADIntegrator(mi.CppADIntegrator):
                         params: Any,
                         grad_in: mi.TensorXf,
                         sensor: Union[int, mi.Sensor] = 0,
-                        seed: int = 0,
+                        seed: mi.UInt32 = 0,
                         spp: int = 0) -> None:
 
         if isinstance(sensor, int):
             sensor = scene.sensors()[sensor]
 
         film = sensor.film()
-        aovs = self.aovs()
 
         # Disable derivatives in all of the following
         with dr.suspend_grad():
             # Prepare the film and sample generator for rendering
-            sampler, spp = self.prepare(sensor, seed, spp, aovs)
-
-            # When the underlying integrator supports reparameterizations,
-            # perform necessary initialization steps and wrap the result using
-            # the _ReparamWrapper abstraction defined above
-            if hasattr(self, 'reparam'):
-                reparam = _ReparamWrapper(
-                    scene=scene,
-                    params=params,
-                    reparam=self.reparam,
-                    wavefront_size=sampler.wavefront_size(),
-                    seed=seed
-                )
-            else:
-                reparam = None
+            sampler, spp = self.prepare(sensor, seed, spp, self.aov_names())
 
             # Generate a set of rays starting at the sensor, keep track of
             # derivatives wrt. sample positions ('pos') if there are any
-            ray, weight, pos, det = self.sample_rays(scene, sensor,
-                                                     sampler, reparam)
+            ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             with dr.resume_grad():
-                L, valid, _ = self.sample(
+                L, valid, aovs, _ = self.sample(
                     mode=dr.ADMode.Backward,
                     scene=scene,
                     sampler=sampler,
                     ray=ray,
-                    reparam=reparam,
                     active=mi.Bool(True)
                 )
 
@@ -246,16 +201,16 @@ class ADIntegrator(mi.CppADIntegrator):
                 # Accumulate into the image block
                 ADIntegrator._splat_to_block(
                     block, film, pos,
-                    value=L * weight * det,
-                    weight=det,
+                    value=L * weight,
+                    weight=1,
                     alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
+                    aovs=aovs,
                     wavelengths=ray.wavelengths
                 )
 
                 film.put_block(block)
 
                 del valid
-                gc.collect()
 
                 # This step launches a kernel
                 dr.schedule(block.tensor())
@@ -265,11 +220,10 @@ class ADIntegrator(mi.CppADIntegrator):
                 # retrieve the adjoint radiance
                 dr.set_grad(image, grad_in)
                 dr.enqueue(dr.ADMode.Backward, image)
-                dr.traverse(mi.Float, dr.ADMode.Backward)
+                dr.traverse(dr.ADMode.Backward)
 
             # We don't need any of the outputs here
             del ray, weight, pos, block, sampler
-            gc.collect()
 
             # Run kernel representing side effects of the above
             dr.eval()
@@ -279,8 +233,6 @@ class ADIntegrator(mi.CppADIntegrator):
         scene: mi.Scene,
         sensor: mi.Sensor,
         sampler: mi.Sampler,
-        reparam: Callable[[mi.Ray3f, mi.UInt32, mi.Bool],
-                          Tuple[mi.Vector3f, mi.Float]] = None
     ) -> Tuple[mi.RayDifferential3f, mi.Spectrum, mi.Vector2f, mi.Float]:
         """
         Sample a 2D grid of primary rays for a given sensor
@@ -291,11 +243,6 @@ class ADIntegrator(mi.CppADIntegrator):
         - a ray weight (usually 1 if the sensor's response function is sampled
           perfectly)
         - the continuous 2D image-space positions associated with each ray
-
-        When a reparameterization function is provided via the 'reparam'
-        argument, it will be applied to the returned image-space position (i.e.
-        the sample positions will be moving). The other two return values
-        remain detached.
         """
 
         film = sensor.film()
@@ -321,7 +268,7 @@ class ADIntegrator(mi.CppADIntegrator):
         # Compute the position on the image plane
         pos = mi.Vector2i()
         pos.y = idx // film_size[0]
-        pos.x = dr.fma(-film_size[0], pos.y, idx)
+        pos.x = dr.fma(mi.UInt32(mi.Int32(-film_size[0])), pos.y, idx)
 
         if film.sample_border():
             pos -= border_size
@@ -356,57 +303,14 @@ class ADIntegrator(mi.CppADIntegrator):
                 sample3=aperture_sample
             )
 
-        reparam_det = 1.0
-
-        if reparam is not None:
-            if rfilter.is_box_filter():
-                raise Exception(
-                    "ADIntegrator detected the potential for image-space "
-                    "motion due to differentiable shape or camera pose "
-                    "parameters. This is, however, incompatible with the box "
-                    "reconstruction filter that is currently used. Please "
-                    "specify a smooth reconstruction filter in your scene "
-                    "description (e.g. 'gaussian', which is actually the "
-                    "default)")
-
-            # This is less serious, so let's just warn once
-            if not film.sample_border() and self.sample_border_warning:
-                self.sample_border_warning = True
-
-                mi.Log(mi.LogLevel.Warn,
-                    "ADIntegrator detected the potential for image-space "
-                    "motion due to differentiable shape or camera pose "
-                    "parameters. To correctly account for shapes entering "
-                    "or leaving the viewport, it is recommended that you set "
-                    "the film's 'sample_border' parameter to True.")
-
-            with dr.resume_grad():
-                # Reparameterize the camera ray
-                reparam_d, reparam_det = reparam(ray=dr.detach(ray),
-                                                 depth=mi.UInt32(0))
-
-                # TODO better understand why this is necessary
-                # Reparameterize the camera ray to handle camera translations
-                if dr.grad_enabled(ray.o):
-                    reparam_d, _ = reparam(ray=ray, depth=mi.UInt32(0))
-
-                # Create a fake interaction along the sampled ray and use it to
-                # recompute the position with derivative tracking
-                it = dr.zeros(mi.Interaction3f)
-                it.p = ray.o + reparam_d
-                ds, _ = sensor.sample_direction(it, aperture_sample)
-
-                # Return a reparameterized image position
-                pos_f = ds.uv + film.crop_offset()
-
         # With box filter, ignore random offset to prevent numerical instabilities
         splatting_pos = mi.Vector2f(pos) if rfilter.is_box_filter() else pos_f
 
-        return ray, weight, splatting_pos, reparam_det
+        return ray, weight, splatting_pos
 
     def prepare(self,
                 sensor: mi.Sensor,
-                seed: int = 0,
+                seed: mi.UInt32 = 0,
                 spp: int = 0,
                 aovs: list = []):
         """
@@ -435,7 +339,8 @@ class ADIntegrator(mi.CppADIntegrator):
         """
 
         film = sensor.film()
-        sampler = sensor.sampler().clone()
+        original_sampler =  sensor.sampler()
+        sampler = original_sampler.clone()
 
         if spp != 0:
             sampler.set_sample_count(spp)
@@ -463,28 +368,36 @@ class ADIntegrator(mi.CppADIntegrator):
         return sampler, spp
 
     def _splat_to_block(block: mi.ImageBlock,
-                       film: mi.Film,
-                       pos: mi.Point2f,
-                       value: mi.Spectrum,
-                       weight: mi.Float,
-                       alpha: mi.Float,
-                       wavelengths: mi.Spectrum):
+                        film: mi.Film,
+                        pos: mi.Point2f,
+                        value: mi.Spectrum,
+                        weight: mi.Float,
+                        alpha: mi.Float,
+                        aovs: Sequence[mi.Float],
+                        wavelengths: mi.Spectrum):
         '''Helper function to splat values to a imageblock'''
         if (dr.all(mi.has_flag(film.flags(), mi.FilmFlags.Special))):
             aovs = film.prepare_sample(value, wavelengths,
-                                        block.channel_count(),
-                                        weight=weight,
-                                        alpha=alpha)
+                                       block.channel_count(),
+                                       weight=weight,
+                                       alpha=alpha)
             block.put(pos, aovs)
             del aovs
         else:
-            block.put(
-                pos=pos,
-                wavelengths=wavelengths,
-                value=value,
-                weight=weight,
-                alpha=alpha
-            )
+            if mi.is_polarized:
+                value = mi.unpolarized_spectrum(value)
+            if mi.is_spectral:
+                rgb = mi.spectrum_to_srgb(value, wavelengths)
+            elif mi.is_monochromatic:
+                rgb = mi.Color3f(value.x)
+            else:
+                rgb = value
+            if mi.has_flag(film.flags(), mi.FilmFlags.Alpha):
+                aovs = [rgb.x, rgb.y, rgb.z, alpha, weight] + aovs
+            else:
+                aovs = [rgb.x, rgb.y, rgb.z, weight] + aovs
+            block.put(pos, aovs)
+
 
     def sample(self,
                mode: dr.ADMode,
@@ -493,11 +406,9 @@ class ADIntegrator(mi.CppADIntegrator):
                ray: mi.Ray3f,
                depth: mi.UInt32,
                δL: Optional[mi.Spectrum],
+               δaovs: Optional[mi.Spectrum],
                state_in: Any,
-               reparam: Optional[
-                   Callable[[mi.Ray3f, mi.UInt32, mi.Bool],
-                            Tuple[mi.Vector3f, mi.Float]]],
-               active: mi.Bool) -> Tuple[mi.Spectrum, mi.Bool]:
+               active: mi.Bool) -> Tuple[mi.Spectrum, mi.Bool, List[mi.Float]]:
         """
         This function does the main work of differentiable rendering and
         remains unimplemented here. It is provided by subclasses of the
@@ -551,13 +462,6 @@ class ADIntegrator(mi.CppADIntegrator):
             that this state vector is provided to them via this argument. When
             invoked in primal mode, it should be set to ``None``.
 
-        Parameter ``reparam`` (see above):
-            If provided, this callable takes a ray and a mask of active SIMD
-            lanes and returns a reparameterized ray and Jacobian determinant.
-            The implementation of the ``sample`` function should then use it to
-            correctly account for visibility-induced discontinuities during
-            differentiation.
-
         Parameter ``active`` (``mi.Bool``):
             This mask array can optionally be used to indicate that some of
             the rays are disabled.
@@ -571,6 +475,12 @@ class ADIntegrator(mi.CppADIntegrator):
         Output ``valid`` (``mi.Bool``):
             Indicates whether the rays intersected a surface, which can be used
             to compute an alpha channel.
+
+        Output ``aovs`` (``List[mi.Float]``):
+            Integrators may return one or more arbitrary output variables (AOVs).
+            The implementation has to guarantee that the number of returned AOVs
+            matches the length of self.aov_names().
+
         """
 
         raise Exception('RBIntegrator does not provide the sample() method. '
@@ -588,7 +498,7 @@ class RBIntegrator(ADIntegrator):
                        scene: mi.Scene,
                        params: Any,
                        sensor: Union[int, mi.Sensor] = 0,
-                       seed: int = 0,
+                       seed: mi.UInt32 = 0,
                        spp: int = 0) -> mi.TensorXf:
         """
         Evaluates the forward-mode derivative of the rendering step.
@@ -650,34 +560,18 @@ class RBIntegrator(ADIntegrator):
             sensor = scene.sensors()[sensor]
 
         film = sensor.film()
-        aovs = self.aovs()
 
         # Disable derivatives in all of the following
         with dr.suspend_grad():
             # Prepare the film and sample generator for rendering
-            sampler, spp = self.prepare(sensor, seed, spp, aovs)
-
-            # When the underlying integrator supports reparameterizations,
-            # perform necessary initialization steps and wrap the result using
-            # the _ReparamWrapper abstraction defined above
-            if hasattr(self, 'reparam'):
-                reparam = _ReparamWrapper(
-                    scene=scene,
-                    params=params,
-                    reparam=self.reparam,
-                    wavefront_size=sampler.wavefront_size(),
-                    seed=seed
-                )
-            else:
-                reparam = None
+            sampler, spp = self.prepare(sensor, seed, spp, self.aov_names())
 
             # Generate a set of rays starting at the sensor, keep track of
             # derivatives wrt. sample positions ('pos') if there are any
-            ray, weight, pos, det = self.sample_rays(scene, sensor,
-                                                     sampler, reparam)
+            ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             # Launch the Monte Carlo sampling process in primal mode (1)
-            L, valid, state_out = self.sample(
+            L, valid, aovs, state_out = self.sample(
                 mode=dr.ADMode.Primal,
                 scene=scene,
                 sampler=sampler.clone(),
@@ -685,61 +579,21 @@ class RBIntegrator(ADIntegrator):
                 depth=mi.UInt32(0),
                 δL=None,
                 state_in=None,
-                reparam=None,
                 active=mi.Bool(True)
             )
 
             # Launch the Monte Carlo sampling process in forward mode (2)
-            δL, valid_2, state_out_2 = self.sample(
+            δL, valid_2, δaovs, state_out_2 = self.sample(
                 mode=dr.ADMode.Forward,
                 scene=scene,
                 sampler=sampler,
                 ray=ray,
                 depth=mi.UInt32(0),
                 δL=None,
+                δaovs=None,
                 state_in=state_out,
-                reparam=reparam,
                 active=mi.Bool(True)
             )
-
-            # Differentiable camera pose parameters or a reparameterization
-            # have an effect on the measurement integral performed at the
-            # sensor. We account for this here by differentiating the
-            # 'ImageBlock.put()' operation using differentiable sample
-            # positions. One important aspect of how this operation works in
-            # Mitsuba is that it computes a separate 'weight' channel
-            # containing the (potentially quite non-uniform) accumulated filter
-            # weights of all samples. This non-uniformity is then divided out
-            # at the end. It's crucial that we also account for this when
-            # computing derivatives, or they will be unusably noisy.
-
-            sample_pos_deriv = None # disable by default
-
-            with dr.resume_grad():
-                if dr.grad_enabled(pos):
-                    sample_pos_deriv = film.create_block()
-
-                    # Only use the coalescing feature when rendering enough samples
-                    sample_pos_deriv.set_coalesce(sample_pos_deriv.coalesce() and spp >= 4)
-
-                    # Deposit samples with gradient tracking for 'pos'.
-                    ADIntegrator._splat_to_block(
-                        sample_pos_deriv, film, pos,
-                        value=L * weight * det,
-                        weight=det,
-                        alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
-                        wavelengths=ray.wavelengths
-                    )
-
-                    # Compute the derivative of the reparameterized image ..
-                    tensor = sample_pos_deriv.tensor()
-                    dr.forward_to(tensor, flags=dr.ADFlag.ClearInterior | dr.ADFlag.ClearEdges)
-
-                    dr.schedule(tensor, dr.grad(tensor))
-
-                    # Done with this part, let's detach the image-space position
-                    dr.disable_grad(pos)
-                    del tensor
 
             # Prepare an ImageBlock as specified by the film
             block = film.create_block()
@@ -753,6 +607,7 @@ class RBIntegrator(ADIntegrator):
                 value=δL * weight,
                 weight=1.0,
                 alpha=dr.select(valid_2, mi.Float(1), mi.Float(0)),
+                aovs=[δaov * weight for δaov in δaovs],
                 wavelengths=ray.wavelengths
             )
 
@@ -760,24 +615,10 @@ class RBIntegrator(ADIntegrator):
             film.put_block(block)
 
             # Explicitly delete any remaining unused variables
-            del sampler, ray, weight, pos, L, valid, δL, valid_2, params, \
-                state_out, state_out_2, block
-
-            # Probably a little overkill, but why not.. If there are any
-            # DrJit arrays to be collected by Python's cyclic GC, then
-            # freeing them may enable loop simplifications in dr.eval().
-            gc.collect()
+            del sampler, ray, weight, pos, L, valid, aovs, δL, δaovs, \
+                valid_2, params, state_out, state_out_2, block
 
             result_grad = film.develop()
-
-            # Potentially add the derivative of the reparameterized samples
-            if sample_pos_deriv is not None:
-                with dr.resume_grad():
-                    film.clear()
-                    film.put_block(sample_pos_deriv)
-                    reparam_result = film.develop()
-                    dr.forward_to(reparam_result)
-                    result_grad += dr.grad(reparam_result)
 
         return result_grad
 
@@ -786,7 +627,7 @@ class RBIntegrator(ADIntegrator):
                         params: Any,
                         grad_in: mi.TensorXf,
                         sensor: Union[int, mi.Sensor] = 0,
-                        seed: int = 0,
+                        seed: mi.UInt32 = 0,
                         spp: int = 0) -> None:
         """
         Evaluates the reverse-mode derivative of the rendering step.
@@ -842,35 +683,20 @@ class RBIntegrator(ADIntegrator):
             sensor = scene.sensors()[sensor]
 
         film = sensor.film()
-        aovs = self.aovs()
 
         # Disable derivatives in all of the following
         with dr.suspend_grad():
             # Prepare the film and sample generator for rendering
-            sampler, spp = self.prepare(sensor, seed, spp, aovs)
-
-            # When the underlying integrator supports reparameterizations,
-            # perform necessary initialization steps and wrap the result using
-            # the _ReparamWrapper abstraction defined above
-            if hasattr(self, 'reparam'):
-                reparam = _ReparamWrapper(
-                    scene=scene,
-                    params=params,
-                    reparam=self.reparam,
-                    wavefront_size=sampler.wavefront_size(),
-                    seed=seed
-                )
-            else:
-                reparam = None
+            sampler, spp = self.prepare(sensor, seed, spp, self.aov_names())
 
             # Generate a set of rays starting at the sensor, keep track of
             # derivatives wrt. sample positions ('pos') if there are any
-            ray, weight, pos, det = self.sample_rays(scene, sensor,
-                                                     sampler, reparam)
+            ray, weight, pos = self.sample_rays(scene, sensor, sampler)
 
             def splatting_and_backward_gradient_image(value: mi.Spectrum,
                                                       weight: mi.Float,
-                                                      alpha: mi.Float):
+                                                      alpha: mi.Float,
+                                                      aovs: Sequence[mi.Float]):
                 '''
                 Backward propagation of the gradient image through the sample
                 splatting and weight division steps.
@@ -887,156 +713,629 @@ class RBIntegrator(ADIntegrator):
                     value=value,
                     weight=weight,
                     alpha=alpha,
+                    aovs=aovs,
                     wavelengths=ray.wavelengths
                 )
 
                 film.put_block(block)
 
-                # Probably a little overkill, but why not.. If there are any
-                # DrJit arrays to be collected by Python's cyclic GC, then
-                # freeing them may enable loop simplifications in dr.eval().
-                gc.collect()
-
                 image = film.develop()
 
                 dr.set_grad(image, grad_in)
                 dr.enqueue(dr.ADMode.Backward, image)
-                dr.traverse(mi.Float, dr.ADMode.Backward)
+                dr.traverse(dr.ADMode.Backward)
 
             # Differentiate sample splatting and weight division steps to
             # retrieve the adjoint radiance (e.g. 'δL')
             with dr.resume_grad():
-                with dr.suspend_grad(pos, det, ray, weight):
-                    L = dr.full(mi.Spectrum, 1.0, dr.width(ray))
-                    dr.enable_grad(L)
+                L = dr.full(mi.Spectrum, 1.0, dr.width(ray))
+                dr.enable_grad(L)
+                aovs = []
+                for _ in self.aov_names():
+                    aov = dr.ones(mi.Float, dr.width(ray))
+                    dr.enable_grad(aov)
+                    aovs.append(aov)
+                splatting_and_backward_gradient_image(
+                    value=L * weight,
+                    weight=1.0,
+                    alpha=1.0,
+                    aovs=[aov * weight for aov in aovs]
+                )
 
-                    splatting_and_backward_gradient_image(
-                        value=L * weight,
-                        weight=1.0,
-                        alpha=1.0
-                    )
-
-                    δL = dr.grad(L)
+                δL = dr.grad(L)
+                δaovs = dr.grad(aovs)
 
             # Clear the dummy data splatted on the film above
             film.clear()
 
             # Launch the Monte Carlo sampling process in primal mode (1)
-            L, valid, state_out = self.sample(
+            L, valid, aovs, state_out = self.sample(
                 mode=dr.ADMode.Primal,
                 scene=scene,
                 sampler=sampler.clone(),
                 ray=ray,
                 depth=mi.UInt32(0),
                 δL=None,
+                δaovs=None,
                 state_in=None,
-                reparam=None,
                 active=mi.Bool(True)
             )
 
             # Launch Monte Carlo sampling in backward AD mode (2)
-            L_2, valid_2, state_out_2 = self.sample(
+            L_2, valid_2, aovs_2, state_out_2 = self.sample(
                 mode=dr.ADMode.Backward,
                 scene=scene,
                 sampler=sampler,
                 ray=ray,
                 depth=mi.UInt32(0),
                 δL=δL,
+                δaovs=δaovs,
                 state_in=state_out,
-                reparam=reparam,
                 active=mi.Bool(True)
             )
 
-            # Propagate gradient image to sample positions if necessary
-            if reparam is not None:
-                with dr.resume_grad():
-                    # Accumulate into the image block.
-                    # After reparameterizing the camera ray, we need to evaluate
-                    #   Σ (fi Li det)
-                    #  ---------------
-                    #   Σ (fi det)
-                    splatting_and_backward_gradient_image(
-                        value=L * weight * det,
-                        weight=det,
-                        alpha=dr.select(valid, mi.Float(1), mi.Float(0))
-                    )
-
             # We don't need any of the outputs here
-            del L_2, valid_2, state_out, state_out_2, δL, \
-                ray, weight, pos, sampler
+            del L_2, valid_2, aovs_2, state_out, state_out_2, \
+                δL, δaovs, ray, weight, pos, sampler
 
-            gc.collect()
 
             # Run kernel representing side effects of the above
             dr.eval()
 
-# ------------------------------------------------------------------------------
 
-class _ReparamWrapper:
+class PSIntegrator(ADIntegrator):
     """
-    This class is an implementation detail of ``ADIntegrator``, which performs
-    necessary initialization steps and subsequently wraps a reparameterization
-    technique. It serves the following important purposes:
-
-    1. Ensuring the availability of uncorrelated random variates.
-    2. Connecting reparameterization calls to relevant shape-related
-       variables in the AD graph.
-    3. Exposing the underlying RNG state to recorded loops.
+    Abstract base class of projective-sampling/path-space style differentiable
+    integrators.
     """
 
-    # ReparamWrapper instances can be provided as dr.Loop state
-    # variables. For this to work we must declare relevant fields
-    DRJIT_STRUCT = { 'rng' : mi.PCG32 }
+    def __init__(self, props):
+        super().__init__(props)
 
-    def __init__(self,
-                 scene : mi.Scene,
-                 params: Any,
-                 reparam: Callable[
-                     [mi.Scene, mi.PCG32, Any,
-                      mi.Ray3f, mi.UInt32, mi.Bool],
-                     Tuple[mi.Vector3f, mi.Float]],
-                 wavefront_size : int,
-                 seed : int):
+        self.proj_detail = mi.ad.ProjectiveDetail(self)
 
-        self.scene = scene
-        self.params = params
-        self.reparam = reparam
+        # Effective sample count per pixel for the continuous derivative, the
+        # primarily visible discontinuous derivative, and the indirect
+        # discontinuous derivative.
+        # These values are *ONLY* used if no runtime spp value is provided or it
+        # is equal to 0
+        self.sppc = props.get('sppc', None)
+        self.sppp = props.get('sppp', None)
+        self.sppi = props.get('sppi', None)
 
-        # Only link the reparameterization CustomOp to differentiable scene
-        # parameters with the AD computation graph if they control shape
-        # information (vertex positions, etc.)
-        if isinstance(params, mi.SceneParameters):
-            params = params.copy()
-            params.keep(
-                [
-                    k for k in params.keys() \
-                        if (params.flags(k) & mi.ParamFlags.Discontinuous) != 0
-                ]
+        self.guiding = props.get('guiding', 'octree')
+        self.guiding_proj = props.get('guiding_proj', True)
+        self.guiding_rounds = props.get('guiding_rounds', 1)
+
+        if self.guiding not in ['none', 'grid', 'octree']:
+            raise Exception("\"guiding\" must be set to \"none\", \"grid\", or \"octree\"")
+
+        ############## Additional internal parameters and flags ###############
+        # All values below should be considered as safe & sane defaults for most
+        # use cases. Modifying them requires a deeper understanding of the
+        # internals of the integrator or of the guiding structures it uses. The
+        # parameters exposed through the plugin's properties are, in comparison,
+        # higher-level parameters.
+
+        # If set to be "True", use radiative backpropagation to compute the
+        # continuous derivative. This can only be set by the PSIntegrator
+        # implementation and should not be modified here.
+        self.radiative_backprop = True
+
+        # Guiding grid resolution, only used when guiding == 'grid'
+        self.guiding_grid_reso = [10000, 100, 100]
+
+        # Number of samples per pixel to be projected for guiding. If set to 0,
+        # it will use `ceil(prod(guiding_resolution)/num_pixels)`.
+        self.proj_seed_spp = 512
+
+        # Samples with a smaller contribution than "value * mass_ttl" will be
+        # clamped for numerical stability
+        self.clamp_mass_thres = 1e-8
+
+        # Apply a power transform on the sample contribution as x'=x^(1-this) to
+        # suppress outliers. If set to 0, no transform will be applied.
+        self.scale_mass = 0.
+
+        ##### MESH PROJECTION #####
+        # Mesh projection algorithm {'hybrid', 'walk', 'jump'}
+        self.proj_mesh_algo = 'hybrid'
+
+        # Maximum number of mesh local walks
+        self.proj_mesh_max_walk = 30
+
+        # Maximum number of mesh jumps
+        self.proj_mesh_max_jump = 2
+
+        ##### OCTREE #####
+        # Maximum depth of the octree
+        self.octree_max_depth = 9
+
+        # Maximum number of leaves in the octree (~16.8 million)
+        self.octree_max_leaf_cnt = 2 ** 24
+
+        # Number of extra samples per leaf
+        self.octree_extra_leaf_sample = 256
+
+        # Pre-partition the x-axis into "this" slices to account for the
+        # extra heterogeneity along the x-dimension.
+        self.octree_highres_x_slices = 100
+
+        # Boundary samples with contribution smaller than this value
+        # will be ignored during octree construction. If set to be 0, the
+        # integrator will compute a threshold with an expensive estimate.
+        self.octree_contruction_thres = 0
+
+        # If `octree_contruction_thres` is 0, the integrator computes the
+        # mean contribution of all non-zero boundary samples, and sets
+        # `octree_contruction_thres` as "mean * octree_construction_mean_mult".
+        # The same threshold will be reused unless it is manually reset to 0.
+        self.octree_construction_mean_mult = 0.1
+
+        # If set to be "True", launch one kernel for all rounds of
+        # projections. Otherwise a recorded loop simulates the multi-round
+        # initialization.
+        self.octree_scatter_inc = True
+
+        ##### OTHER #####
+        # Warn about potential bias due to shapes entering/leaving the frame
+        self.sample_border_warning = True
+
+
+    def override_spp(self, integrator_spp: Optional[int], runtime_spp: int, sampler_spp: int):
+        """
+        Utility method to override the intergrator's spp value with the one
+        received at runtime in `render`/`render_backward`/`render_forward`.
+
+        Priority order:
+        1. If the integrator's spp is explicitly disabled (set to 0), use 0
+           regardless of runtime_spp.
+        2. Otherwise, prefer the runtime_spp value.
+        3. If runtime_spp is 0:
+            - Use integrator_spp if it is defined (not None).
+            - Otherwise, fall back to sampler_spp.
+        """
+        if integrator_spp is not None and integrator_spp == 0:
+            # If spp is explicitly disabled (set to 0), do not override it with
+            # runtime_spp
+            return 0
+        else:
+            if runtime_spp == 0:
+                if integrator_spp is not None:
+                    return integrator_spp
+                else:
+                    return sampler_spp
+            else:
+                return runtime_spp
+
+    def render_ad(self,
+                  scene: mi.Scene,
+                  sensor: Union[int, mi.Sensor],
+                  seed: mi.UInt32,
+                  spp: int,
+                  mode: dr.ADMode) -> mi.TensorXf:
+        """
+        Renders and accumulates the outputs of the primarily visible
+        discontinuities, indirect discontinuities and continuous derivatives.
+        It outputs an attached tensor which should subsequently be traversed by
+        a call to `dr.forward`/`dr.backward`/`dr.enqueue`/`dr.traverse`.
+
+        Note: The continuous derivatives are only attached if
+        `radiative_backprop` is `False`. When using RB for the continuous
+        derivatives it should be manually added to the gradient obtained by
+        traversing the result of this method.
+        """
+        if dr.flag(dr.JitFlag.FreezingScope):
+            raise RuntimeError(
+                "Projective Integrators are not yet supported inside of frozen functions."
+            )
+        if isinstance(sensor, int):
+            sensor = scene.sensors()[sensor]
+
+        film = sensor.film()
+        aovs = self.aov_names()
+        shape = (film.crop_size()[1],
+                 film.crop_size()[0],
+                 film.base_channels_count() + len(aovs))
+        result_img = dr.zeros(mi.TensorXf, shape=shape)
+
+        sampler_spp = sensor.sampler().sample_count()
+        sppc = self.override_spp(self.sppc, spp, sampler_spp)
+        sppp = self.override_spp(self.sppp, spp, sampler_spp)
+        sppi = self.override_spp(self.sppi, spp, sampler_spp)
+
+        silhouette_shapes = scene.silhouette_shapes()
+        has_silhouettes = len(silhouette_shapes) > 0
+
+        # This isn't serious, so let's just warn once
+        if has_silhouettes and not film.sample_border() and self.sample_border_warning:
+            self.sample_border_warning = False
+            mi.Log(mi.LogLevel.Warn,
+                "PSIntegrator detected the potential for image-space "
+                "motion due to differentiable shape parameters. To correctly "
+                "account for shapes entering or leaving the viewport, it is "
+                "recommended that you set the film's 'sample_border' parameter "
+                "to True.")
+
+        # Primarily visible discontinuous derivative
+        if sppp > 0 and has_silhouettes:
+            with dr.suspend_grad():
+                self.proj_detail.init_primarily_visible_silhouette(scene, sensor)
+
+            sampler, spp = self.prepare(sensor, 0xffffffff ^ seed, sppp, aovs)
+            result_img += self.render_primarily_visible_silhouette(scene, sensor, sampler, spp)
+
+        # Indirect discontinuous derivative
+        if sppi > 0 and has_silhouettes:
+            with dr.suspend_grad():
+                self.proj_detail.init_indirect_silhouette(scene, sensor, 0xafafafaf ^ seed)
+
+            sampler, spp = self.prepare(sensor, 0xaa00aa00 ^ seed, sppi, aovs)
+            result_img += self.render_indirect_silhouette(scene, sensor, sampler, spp)
+
+        ## Continuous derivative (only if radiative backpropagation is not used)
+        if sppc > 0 and (not self.radiative_backprop):
+            with dr.suspend_grad():
+                sampler, spp = self.prepare(sensor, seed, sppc, aovs)
+                ray, weight, pos = self.sample_rays(scene, sensor, sampler)
+
+                # Launch the Monte Carlo sampling process in differentiable mode
+                L, valid, aovs, _ = self.sample(
+                    mode     = mode,
+                    scene    = scene,
+                    sampler  = sampler,
+                    ray      = ray,
+                    depth    = 0,
+                    δL       = None,
+                    state_in = None,
+                    active   = mi.Bool(True),
+                    project  = False,
+                    si_shade = None
+                )
+
+            block = film.create_block()
+            block.set_coalesce(block.coalesce() and sppc >= 4)
+
+            ADIntegrator._splat_to_block(
+                block, film, pos,
+                value=L * weight,
+                weight=1.0,
+                alpha=dr.select(valid, mi.Float(1), mi.Float(0)),
+                aovs=[aov * weight for aov in aovs],
+                wavelengths=ray.wavelengths
             )
 
-        # Create a uniform random number generator that won't show any
-        # correlation with the main sampler. PCG32Sampler.seed() uses
-        # the same logic except for the XOR with -1
+            film.put_block(block)
+            result_img += film.develop()
 
-        idx = dr.arange(mi.UInt32, wavefront_size)
-        tmp = dr.opaque(mi.UInt32, 0xffffffff ^ seed)
-        v0, v1 = mi.sample_tea_32(tmp, idx)
-        self.rng = mi.PCG32(initstate=v0, initseq=v1)
+        return result_img
 
-    def __call__(self,
-                 ray: mi.Ray3f,
-                 depth: mi.UInt32,
-                 active: Union[mi.Bool, bool] = True
-    ) -> Tuple[mi.Vector3f, mi.Float]:
+    def render_forward(self,
+                       scene: mi.Scene,
+                       params: Any,
+                       sensor: Union[int, mi.Sensor] = 0,
+                       seed: mi.UInt32 = 0,
+                       spp: int = 0) -> mi.TensorXf:
+        if isinstance(sensor, int):
+            sensor = scene.sensors()[sensor]
+
+        film = sensor.film()
+        shape = (film.crop_size()[1],
+                 film.crop_size()[0],
+                 film.base_channels_count() + len(self.aov_names()))
+        result_grad = dr.zeros(mi.TensorXf, shape=shape)
+
+        sampler_spp = sensor.sampler().sample_count()
+        sppc = self.override_spp(self.sppc, spp, sampler_spp)
+        sppp = self.override_spp(self.sppp, spp, sampler_spp)
+        sppi = self.override_spp(self.sppi, spp, sampler_spp)
+
+        # Continuous derivative (if RB is used)
+        if self.radiative_backprop and sppc > 0:
+            result_grad += RBIntegrator.render_forward(
+                self, scene, None, sensor, seed, sppc)
+
+        # Discontinuous derivative (and the non-RB continuous derivative)
+        if sppp > 0 or sppi > 0 or \
+           (sppc > 0 and not self.radiative_backprop):
+
+            # Compute an image with all derivatives attached
+            ad_img = self.render_ad(scene, sensor, seed, spp, dr.ADMode.Forward)
+
+            # We should only complain about the parameters not being attached
+            # if `ad_img` isn't attached and we haven't used RB for the
+            # continuous derivatives.
+            if dr.grad_enabled(ad_img) or not self.radiative_backprop:
+                dr.forward_to(ad_img)
+                grad_img = dr.grad(ad_img)
+                result_grad += grad_img
+
+        return result_grad
+
+    def render_backward(self,
+                        scene: mi.Scene,
+                        params: Any,
+                        grad_in: mi.TensorXf,
+                        sensor: Union[int, mi.Sensor] = 0,
+                        seed: mi.UInt32 = 0,
+                        spp: int = 0) -> None:
+        if isinstance(sensor, int):
+            sensor = scene.sensors()[sensor]
+
+        sampler_spp = sensor.sampler().sample_count()
+        sppc = self.override_spp(self.sppc, spp, sampler_spp)
+        sppp = self.override_spp(self.sppp, spp, sampler_spp)
+        sppi = self.override_spp(self.sppi, spp, sampler_spp)
+
+        # Continuous derivative (if RB is used)
+        if self.radiative_backprop and sppc > 0:
+            RBIntegrator.render_backward(
+                self, scene, None, grad_in, sensor, seed, sppc)
+
+        # Discontinuous derivative (and the non-RB continuous derivative)
+        if sppp > 0 or sppi > 0 or \
+           (sppc > 0 and not self.radiative_backprop):
+
+            # Compute an image with all derivatives attached
+            ad_img = self.render_ad(
+                scene, sensor, seed, spp, dr.ADMode.Backward)
+
+            dr.set_grad(ad_img, grad_in)
+            dr.enqueue(dr.ADMode.Backward, ad_img)
+            dr.traverse(dr.ADMode.Backward)
+
+        dr.eval()
+
+    ################# Primarily visible discontinuous derivative ###############
+
+    def render_primarily_visible_silhouette(self,
+                                            scene: mi.Scene,
+                                            sensor: mi.Sensor,
+                                            sampler: mi.Sampler,
+                                            spp: int) -> mi.TensorXf:
         """
-        This function takes a ray, a path depth value (to potentially disable
-        reparameterizations after a certain number of bounces) and a boolean
-        active mask as input and returns the reparameterized ray direction and
-        the Jacobian determinant of the change of variables.
-        """
-        return self.reparam(self.scene, self.rng, self.params, ray,
-                            depth, active)
+        Renders the primarily visible discontinuities.
 
+        This method returns the AD-attached image. The result must still be
+        traversed using one of the Dr.Jit functions to propagate gradients.
+        """
+        film = sensor.film()
+        aovs = self.aov_names()
+
+        # Explicit sampling to handle the primarily visible discontinuous derivative
+        with dr.suspend_grad():
+            # Get the viewpoint
+            sensor_center = sensor.world_transform() @ mi.Point3f(0)
+
+            # Sample silhouette point
+            ss = self.proj_detail.sample_primarily_visible_silhouette(
+                scene, sensor_center, sampler.next_2d(), True)
+            active = ss.is_valid() & (ss.pdf > 0)
+
+            # Jacobian (motion correction included)
+            J = self.proj_detail.sensor_jacobian(sensor, ss)
+
+            ΔL, wavelengths = self.proj_detail.eval_primary_silhouette_radiance_difference(
+                scene, sampler, ss, sensor, active=active)
+            active &= dr.any(ΔL != 0)
+
+        # ∂z/∂ⲡ * normal
+        si = dr.zeros(mi.SurfaceInteraction3f)
+        si.p = ss.p
+        si.prim_index = ss.prim_index
+        si.uv = ss.uv
+        p = ss.shape.differential_motion(dr.detach(si), active)
+        motion = dr.dot(p, ss.n)
+
+        # Compute the derivative
+        derivative = ΔL * motion * dr.rcp(ss.pdf) * J
+
+        # Prepare a new imageblock and compute splatting coordinates
+        film.prepare(aovs)
+        with dr.suspend_grad():
+            it = dr.zeros(mi.Interaction3f)
+            it.p = ss.p
+            sensor_ds, _ = sensor.sample_direction(it, mi.Point2f(0))
+
+        # Particle tracer style imageblock to accumulate primarily visible derivatives
+        block = film.create_block(normalize=True)
+        block.set_coalesce(block.coalesce() and spp >= 4)
+        block.put(
+            pos=sensor_ds.uv,
+            wavelengths=wavelengths,
+            value=derivative * dr.rcp(mi.ScalarFloat(spp)),
+            weight=0,
+            alpha=1,
+            active=active
+        )
+        film.put_block(block)
+
+        return film.develop()
+
+    #################### Indirect discontinuous derivatives ####################
+
+    def sample_radiance_difference(self, scene, ss, curr_depth, sampler,
+                                   wavelengths, active):
+        """
+        Sample the radiance difference of two rays that hit and miss the
+        silhouette point `ss.p` with direction `ss.d`.
+
+        Parameter ``scene`` (``mi.Scene``)
+            Reference to the scene being rendered in a differentiable manner.
+
+        Parameter ``ss`` (``mi.SilhouetteSample3f``)
+            Reference to the silhouette sample from which to built out the
+            boundary path.
+
+        Parameter ``curr_depth`` (``mi.UInt32``):
+            The current depth of the boundary segment, including the boundary
+            segment itself.
+
+        Parameter ``sampler`` (``mi.Sampler``):
+            A pre-seeded sample generator.
+
+        Parameter ``wavelengths`` (``mi.Wavelength``):
+            Set of sampled wavelengths to be used for the boundary path.
+
+        This function returns a tuple ``(ΔL, active)`` where
+
+        Output ``ΔL`` (``mi.Spectrum``):
+            The estimated radiance difference of the foreground and background.
+
+        Output ``active`` (``mi.Bool``):
+            Indicates if the radiance difference is valid.
+        """
+        raise Exception('PSIntegrator does not provide the '
+                        'sample_radiance_difference() method. '
+                        'It should be implemented by subclasses that '
+                        'specialize the abstract PSIntegrator interface.')
+
+    def sample_importance(self, scene, sensor, ss, max_depth, sampler,
+                          wavelengths, active):
+        """
+        Sample the incident importance at the silhouette point `ss.p` with
+        direction `-ss.d`. If multiple connections to the sensor are valid, this
+        method uses reservoir sampling to pick one.
+
+        Parameter ``scene`` (``mi.Scene``)
+            Reference to the scene being rendered in a differentiable manner.
+
+        Parameter ``ss`` (``mi.SilhouetteSample3f``)
+            Reference to the silhouette sample from which to built out the
+            boundary path.
+
+        Parameters ``max_depth`` (``mi.UInt32``):
+            The maximum number of ray segments to reach the sensor.
+
+        Parameter ``sampler`` (``mi.Sampler``):
+            A pre-seeded sample generator.
+
+        Parameter ``wavelengths`` (``mi.Wavelength``):
+            Set of sampled wavelengths to be used for the boundary path.
+
+        The function returns a tuple ``(importance, uv, depth, boundary_p,
+        valid)`` where
+
+        Output ``importance`` (``mi.Spectrum``):
+            The sampled importance along the constructed path.
+
+        Output ``uv`` (``mi.Point2f``):
+            The sensor splatting coordinates.
+
+        Output ``depth`` (``mi.UInt32``):
+            The number of segments of the sampled path from the boundary
+            segment to the sensor, including the boundary segment itself.
+
+        Output ``boundary_p`` (``mi.Point3f``):
+            The attached sensor-side intersection point of the boundary segment.
+
+        Output ``valid`` (``mi.Bool``):
+            Indicates if a valid path is found.
+        """
+        raise Exception('PSIntegrator does not provide the '
+                        'sample_importance() method. '
+                        'It should be implemented by subclasses that '
+                        'specialize the abstract PSIntegrator interface.')
+
+    def render_indirect_silhouette(self,
+                                   scene: mi.Scene,
+                                   sensor: mi.Sensor,
+                                   sampler: mi.Sampler,
+                                   spp: int) -> mi.TensorXf:
+        film = sensor.film()
+        film.prepare(self.aov_names())
+
+        if self.proj_detail.guiding_distr is not None:
+            # Draw samples from the guiding distribution
+            sample, rcp_pdf_guiding = self.proj_detail.guiding_distr.sample(sampler)
+
+            # Evaluate the discontinuous derivative integrand
+            value, wavelengths, sensor_uv = self.proj_detail.eval_indirect_integrand(
+                scene, sensor, sample, sampler, preprocess=False)
+            active = dr.any(value != 0)
+
+            # Account for the guiding sampling density and spp
+            value *= rcp_pdf_guiding * dr.rcp(spp)
+
+            # Splat the result to the film
+            block = film.create_block(normalize=True)
+            block.set_coalesce(block.coalesce() and spp >= 4)
+            block.put(
+                pos=sensor_uv,
+                wavelengths=wavelengths,
+                value=value,
+                weight=0,
+                alpha=1,
+                active=active
+            )
+            film.put_block(block)
+
+        return film.develop()
+
+    ########################### Integrator interface ###########################
+
+    def sample(self,
+               mode: dr.ADMode,
+               scene: mi.Scene,
+               sampler: mi.Sampler,
+               ray: mi.Ray3f,
+               depth: mi.UInt32,
+               δL: Optional[mi.Spectrum],
+               δaovs: Optional[mi.Spectrum],
+               state_in: Any,
+               active: mi.Bool,
+               project: bool = False,
+               si_shade: Optional[mi.SurfaceInteraction3f] = None
+    ) -> Tuple[mi.Spectrum, mi.Bool, List[mi.Float], Any]:
+        """
+        See ADIntegrator.sample() for a description of this function's purpose.
+
+        Parameter ``depth`` (``mi.UInt32``):
+            Path depth of `ray` (typically set to zero). This is mainly useful
+            for forward/backward differentiable rendering phases that need to
+            obtain an incident radiance estimate. In this case, they may
+            recursively invoke ``sample(mode=dr.ADMode.Primal)`` with a nonzero
+            depth.
+
+        Parameter ``project`` (``bool``):
+            If set to ``True``, the integrator also returns the sampled
+            ``seedrays`` along the Monte Carlo path. This is useful for
+            projective integrators to handle discontinuous derivatives.
+
+        Parameter ``si_shade`` (``mi.SurfaceInteraction3f``):
+            If set to a valid surface interaction, the integrator will use this
+            as the first ray interaction point to skip one ray tracing with the
+            given ``ray``. This is useful to estimate the incident radiance at a
+            given surface point that is already known to the integrator.
+
+        Output ``spec`` (``mi.Spectrum``):
+            Specifies the estimated radiance and differential radiance in primal
+            and forward mode, respectively.
+
+        Output ``valid`` (``mi.Bool``):
+            Indicates whether the rays intersected a surface, which can be used
+            to compute an alpha channel.
+
+        Output ``aovs`` (``Sequence[mi.Float]``):
+            Integrators may return one or more arbitrary output variables (AOVs).
+            The implementation has to guarantee that the number of returned AOVs
+            matches the length of self.aov_names().
+
+        Output ``seedray`` / ``state_out`` (``any``):
+            If ``project`` is true, the integrator returns the seed rays to be
+            projected as the third output. The seed rays is a python list of
+            rays and their validity mask. It is possible that no segment can be
+            projected along a light path.
+
+            If ``project`` is false, the integrator returns the state vector
+            returned by the primal phase of ``sample()`` as the third output.
+            This is only used by the radiative-backpropagation style
+            integrators.
+        """
+
+        raise Exception('PSIntegrator does not provide the sample() method. '
+                        'It should be implemented by subclasses that '
+                        'specialize the abstract PSIntegrator interface.')
 
 # ---------------------------------------------------------------------------
 #  Helper functions used by various differentiable integrators
@@ -1047,7 +1346,39 @@ def mis_weight(pdf_a, pdf_b):
     Compute the Multiple Importance Sampling (MIS) weight given the densities
     of two sampling strategies according to the power heuristic.
     """
-    a2 = dr.sqr(pdf_a)
-    b2 = dr.sqr(pdf_b)
+    a2 = dr.square(pdf_a)
+    b2 = dr.square(pdf_b)
     w = a2 / (a2 + b2)
     return dr.detach(dr.select(dr.isfinite(w), w, 0))
+
+
+def solid_angle_to_area_jacobian(o: mi.Point3f,
+                                 p: mi.Point3f,
+                                 n: mi.Normal3f,
+                                 active: mi.Bool = True):
+    """
+    Computes the Jacobian determinant of the change of variables from solid
+    angle (dω) to surface area (dA) when reparameterizing the integration over
+    a surface.
+
+    Parameter ``o`` (``mi.Point3f``)
+        Origin point (e.g., shading point).
+
+    Parameter ``p`` (``mi.Point3f``)
+        Sampled point on the surface.
+
+    Parameter ``n`` (``mi.Normal3f``)
+        Normal at the sampled point.
+
+    Output:
+        The Jacobian determinant |∂A/∂ω| = (|dot(n, wi)| / ||p - o||^2)
+    """
+    d = p - o
+    d_squared = dr.squared_norm(d)
+    wo = dr.normalize(d)
+
+    cos_theta = dr.abs_dot(n, wo)
+    J = cos_theta / d_squared
+    J = dr.select(active, J, 1)
+
+    return J

@@ -5,6 +5,25 @@ import mitsuba as mi
 from mitsuba.scalar_rgb.test.util import fresolver_append_path
 
 
+def mixed_shapes_scene():
+    return mi.load_dict({
+        "type": "scene",
+        "shape1": {
+            "type" : "ply",
+            "filename" : "resources/data/tests/ply/rectangle_uv.ply",
+        },
+        "shape2": {
+            "type" : "sphere",
+        },
+        "shape3": {
+            "type" : "ply",
+            "filename" : "resources/data/tests/ply/rectangle_uv.ply",
+            "flip_normals": True,
+        },
+    }, parallel=False, optimize=False)
+
+
+
 def test01_create_mesh(variant_scalar_rgb):
     m = mi.Mesh("MyMesh", 3, 2)
 
@@ -26,7 +45,10 @@ def test01_create_mesh(variant_scalar_rgb):
   face_count = 2,
   faces = [24 B of face data],
   surface_area = 0.96,
-  face_normals = 0
+  face_normals = 0,
+  bsdf = SmoothDiffuse[
+    reflectance = UniformSpectrum[value=0.500000]
+  ]
 ]"""
 
 
@@ -42,11 +64,14 @@ def test02_ply_triangle(variant_scalar_rgb):
     positions = params['vertex_positions']
     faces = params['faces']
 
+    Index = dr.scalar.ArrayXi
+    Float = dr.scalar.ArrayXf
+
     assert not m.has_vertex_normals()
     assert dr.width(positions) == 9
-    assert dr.allclose(positions[0:3], [0, 0, 0])
-    assert dr.allclose(positions[3:6], [0, 0, 1])
-    assert dr.allclose(positions[6:9], [0, 1, 0])
+    assert dr.allclose(dr.gather(Float, positions, dr.arange(Index, 0, 3)), [0, 0, 0])
+    assert dr.allclose(dr.gather(Float, positions, dr.arange(Index, 3, 6)), [0, 0, 1])
+    assert dr.allclose(dr.gather(Float, positions, dr.arange(Index, 6, 9)), [0, 1, 0])
     assert dr.width(faces) == 3
     assert faces[0] == mi.UInt32(0)
     assert faces[1] == mi.UInt32(1)
@@ -64,11 +89,14 @@ def test03_ply_computed_normals(variant_scalar_rgb):
     params = mi.traverse(shape)
     normals = params['vertex_normals']
 
+    Index = dr.scalar.ArrayXi
+    Float = dr.scalar.ArrayXf
+
     assert shape.has_vertex_normals()
     # Normals are stored in half precision
-    assert dr.allclose(normals[0:3], [-1, 0, 0])
-    assert dr.allclose(normals[3:6], [-1, 0, 0])
-    assert dr.allclose(normals[6:9], [-1, 0, 0])
+    assert dr.allclose(dr.gather(Float, normals, dr.arange(Index, 0, 3)), [-1, 0, 0])
+    assert dr.allclose(dr.gather(Float, normals, dr.arange(Index, 3, 6)), [-1, 0, 0])
+    assert dr.allclose(dr.gather(Float, normals, dr.arange(Index, 6, 9)), [-1, 0, 0])
 
 
 def test04_normal_weighting_scheme(variant_scalar_rgb):
@@ -93,8 +121,11 @@ def test04_normal_weighting_scheme(variant_scalar_rgb):
     params['faces'] = [0, 1, 2, 0, 3, 4]
     params.update()
 
+    Index = dr.scalar.ArrayXi
+    Float = dr.scalar.ArrayXf
+
     for i in range(5):
-        assert dr.allclose(params['vertex_normals'][i*3:(i+1)*3], n[:, i], 5e-4)
+        assert dr.allclose(dr.gather(Float, params['vertex_normals'], dr.arange(Index, i*3, (i+1)*3)), n[:, i], 5e-4)
 
 
 @fresolver_append_path
@@ -110,11 +141,15 @@ def test05_load_simple_mesh(variant_scalar_rgb):
         positions = params['vertex_positions']
         faces = params['faces']
 
+        Index = dr.scalar.ArrayXi
+        Faces = dr.scalar.ArrayXu
+        Float = dr.scalar.ArrayXf
+
         assert shape.has_vertex_normals()
         assert dr.width(positions) == 72
         assert dr.width(faces) == 36
-        assert dr.allclose(faces[6:9], [4, 5, 6])
-        assert dr.allclose(positions[:5], [130, 165, 65, 82, 165])
+        assert dr.allclose(dr.gather(Faces, faces, dr.arange(Index, 6, 9)), [4, 5, 6])
+        assert dr.allclose(dr.gather(Float, positions, dr.arange(Index, 5)), [130, 165, 65, 82, 165])
 
 
 @pytest.mark.parametrize('mesh_format', ['obj', 'ply', 'serialized'])
@@ -138,7 +173,10 @@ def test06_load_various_features(variant_scalar_rgb, mesh_format, features, face
         texcoords = params['vertex_texcoords']
         faces = params['faces']
 
-        (v0, v2, v3) = [positions[i*3:(i+1)*3] for i in [0, 2, 3]]
+        Index = dr.scalar.ArrayXi
+        Float = dr.scalar.ArrayXf
+
+        (v0, v2, v3) = [dr.gather(Float, positions, dr.arange(Index, i*3,(i+1)*3)) for i in [0, 2, 3]]
 
         assert dr.allclose(v0, [-2.85, 0.0, -7.600000], atol=1e-3)
         assert dr.allclose(v2, [ 2.85, 0.0,  0.599999], atol=1e-3)
@@ -146,7 +184,7 @@ def test06_load_various_features(variant_scalar_rgb, mesh_format, features, face
 
         if 'uv' in features:
             assert shape.has_vertex_texcoords()
-            (uv0, uv2, uv3) = [texcoords[i*2:(i+1)*2] for i in [0, 2, 3]]
+            (uv0, uv2, uv3) = [dr.gather(Float, texcoords, dr.arange(Index, i*2, (i+1)*2)) for i in [0, 2, 3]]
             # For OBJs (and .serialized generated from OBJ), UV.y is flipped.
             if mesh_format in ['obj', 'serialized']:
                 assert dr.allclose(uv0, [0.950589, 1-0.988416], atol=1e-3)
@@ -158,7 +196,7 @@ def test06_load_various_features(variant_scalar_rgb, mesh_format, features, face
                 assert dr.allclose(uv3, [0.950589, 0.689127], atol=1e-3)
 
         if shape.has_vertex_normals():
-            for n in [normals[i*3:(i+1)*3] for i in [0, 2, 3]]:
+            for n in [dr.gather(Float, normals, dr.arange(Index, i*3, (i+1)*3)) for i in [0, 2, 3]]:
                 assert dr.allclose(n, [0.0, 1.0, 0.0])
 
     return fresolver_append_path(test)()
@@ -184,11 +222,14 @@ def test07_ply_stored_attribute(variant_scalar_rgb):
   face_normals = 0,
   mesh attributes = [
     face_color: 3 floats
+  ],
+  bsdf = SmoothDiffuse[
+    reflectance = UniformSpectrum[value=0.500000]
   ]
 ]"""
 
 
-def test08_mesh_add_attribute(variant_scalar_rgb):
+def test08_mesh_manage_attributes(variant_scalar_rgb):
     m = mi.Mesh("MyMesh", 3, 2)
 
     params = mi.traverse(m)
@@ -211,8 +252,17 @@ def test08_mesh_add_attribute(variant_scalar_rgb):
   face_normals = 0,
   mesh attributes = [
     vertex_color: 3 floats
+  ],
+  bsdf = SmoothDiffuse[
+    reflectance = UniformSpectrum[value=0.500000]
   ]
 ]"""
+
+    with pytest.raises(Exception, match='Attribute "vertex_wrong" not found.'):
+        m.remove_attribute("vertex_wrong")
+
+    m.remove_attribute("vertex_color")
+    assert not m.has_attribute("vertex_color")
 
 
 @fresolver_append_path
@@ -241,16 +291,16 @@ def test09_eval_parameterization(variants_all_rgb):
     assert dr.allclose(si.p, [-.6, -.4, 0])
 
     # Test with symbolic virtual function call
-    if not 'scalar' in mi.variant():
+    if dr.is_jit_v(mi.Float):
         emitter = shape.emitter()
         N = 4
-        mask = dr.eq(dr.arange(mi.UInt32, N) & 1, 0)
-        emitters = dr.select(mask, mi.EmitterPtr(emitter), dr.zeros(mi.EmitterPtr))
+        mask = mi.Bool(False, True, False, True)
+        emitters = mi.EmitterPtr(emitter)
         it = dr.zeros(mi.Interaction3f, N)
         it.p = [0, 0, -3]
         it.t = 0
-        uv = emitters.sample_direction(it, [0.5, 0.5])[0].uv
-        assert dr.allclose(uv, dr.select(mask, mi.Point2f(0.5), mi.Point2f(0.0)))
+        ds, _ = emitters.sample_direction(it, [0.5, 0.5], mask)
+        assert dr.allclose(ds.uv, dr.select(mask, mi.Point2f(0.5), mi.Point2f(0.0)))
 
 
 @fresolver_append_path
@@ -299,7 +349,7 @@ def test11_parameters_grad_enabled(variants_all_ad_rgb):
         "filename" : "resources/data/common/meshes/rectangle.obj",
     })
 
-    assert shape.parameters_grad_enabled() == False
+    assert not shape.parameters_grad_enabled()
 
     # Get the shape's parameters
     params = mi.traverse(shape)
@@ -309,28 +359,26 @@ def test11_parameters_grad_enabled(variants_all_ad_rgb):
     dr.enable_grad(params[bsdf_param_key])
     params.set_dirty(bsdf_param_key)
     params.update()
-    assert shape.parameters_grad_enabled() == False
+    assert not shape.parameters_grad_enabled()
 
     # When setting one of the shape's param to require gradient, method should return True
     shape_param_key = 'vertex_positions'
     dr.enable_grad(params[shape_param_key])
     params.set_dirty(shape_param_key)
     params.update()
-    assert shape.parameters_grad_enabled() == True
+    assert shape.parameters_grad_enabled()
 
 if hasattr(dr, 'JitFlag'):
     jit_flags_options = [
-        {dr.JitFlag.VCallRecord : 0, dr.JitFlag.VCallOptimize : 0, dr.JitFlag.LoopRecord : 0},
-        {dr.JitFlag.VCallRecord : 1, dr.JitFlag.VCallOptimize : 0, dr.JitFlag.LoopRecord : 0},
-        {dr.JitFlag.VCallRecord : 1, dr.JitFlag.VCallOptimize : 1, dr.JitFlag.LoopRecord : 0},
+        {dr.JitFlag.VCallRecord : False,    dr.JitFlag.VCallOptimize : False,   dr.JitFlag.LoopRecord : False},
+        {dr.JitFlag.VCallRecord : True,     dr.JitFlag.VCallOptimize : False,   dr.JitFlag.LoopRecord : False},
+        {dr.JitFlag.VCallRecord : True,     dr.JitFlag.VCallOptimize : True,    dr.JitFlag.LoopRecord : False},
     ]
 else:
     jit_flags_options = []
 
 @fresolver_append_path
 def test12_differentiable_surface_interaction_automatic(variants_all_ad_rgb):
-    dr.set_flag(dr.JitFlag.VCallRecord, False)
-
     scene = mi.load_dict({
         "type" : "scene",
         "meshes": {
@@ -472,7 +520,7 @@ def test15_differentiable_surface_interaction_params_forward(variants_all_ad_rgb
     params = mi.traverse(scene)
     shape_param_key = 'rect.vertex_positions'
     positions_buf = params[shape_param_key]
-    positions_initial = dr.unravel(mi.Point3f, positions_buf)
+    positions_initial = dr.unravel(mi.Point3f, mi.Float(positions_buf))
 
     # Create differential parameter to be optimized
     diff_vector = mi.Vector3f(0.0)
@@ -493,26 +541,26 @@ def test15_differentiable_surface_interaction_params_forward(variants_all_ad_rgb
     pi = scene.ray_intersect_preliminary(ray, coherent=True)
 
     # # If the vertices are shifted along z-axis, so does si.t
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray)
     dr.forward(diff_vector.z)
     assert dr.allclose(dr.grad(si.t), 1)
 
     # If the vertices are shifted along z-axis, so does si.p
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray)
     p = si.p + mi.Float(0.001) # Ensure p is a AD leaf node
     dr.forward(diff_vector.z)
     assert dr.allclose(dr.grad(p), [0.0, 0.0, 1.0])
 
     # If the vertices are shifted along x-axis, so does si.uv (times 0.5)
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray)
     dr.forward(diff_vector.x)
     assert dr.allclose(dr.grad(si.uv), [-0.5, 0.0])
 
     # If the vertices are shifted along y-axis, so does si.uv (times 0.5)
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray)
     dr.forward(diff_vector.y)
     assert dr.allclose(dr.grad(si.uv), [0.0, -0.5])
@@ -524,7 +572,7 @@ def test15_differentiable_surface_interaction_params_forward(variants_all_ad_rgb
     pi = scene.ray_intersect_preliminary(ray, coherent=True)
 
     # If the vertices are rotated around the center, so does si.uv (times 0.5)
-    apply_transformation(lambda v : mi.Transform4f.rotate([0, 0, 1], v.x))
+    apply_transformation(lambda v : mi.Transform4f().rotate([0, 0, 1], v.x))
     si = pi.compute_surface_interaction(ray)
     dr.forward(diff_vector.x)
     du = 0.5 * dr.sin(2 * dr.pi / 360.0)
@@ -688,7 +736,7 @@ def test17_sticky_differentiable_surface_interaction_params_forward(variants_all
     params = mi.traverse(scene)
     shape_param_key = 'rect.vertex_positions'
     positions_buf = params[shape_param_key]
-    positions_initial = dr.unravel(mi.Point3f, positions_buf)
+    positions_initial = dr.unravel(mi.Point3f, mi.Float(positions_buf))
 
     # Create differential parameter to be optimized
     diff_vector = mi.Vector3f(0.0)
@@ -709,27 +757,27 @@ def test17_sticky_differentiable_surface_interaction_params_forward(variants_all
     pi = scene.ray_intersect_preliminary(ray, coherent=True)
 
     # If the vertices are shifted along x-axis, si.p won't move
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray)
     p = si.p + mi.Float(0.001) # Ensure p is a AD leaf node
     dr.forward(diff_vector.x)
     assert dr.allclose(dr.grad(p), [0.0, 0.0, 0.0], atol=1e-5)
 
     # If the vertices are shifted along x-axis, sticky si.p should follow
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray, mi.RayFlags.All | mi.RayFlags.FollowShape)
     p = si.p + mi.Float(0.001) # Ensure p is a AD leaf node
     dr.forward(diff_vector.x)
     assert dr.allclose(dr.grad(p), [1.0, 0.0, 0.0], atol=1e-5)
 
     # If the vertices are shifted along x-axis, si.uv should move
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray)
     dr.forward(diff_vector.x)
     assert dr.allclose(dr.grad(si.uv), [-0.5, 0.0], atol=1e-5)
 
     # If the vertices are shifted along x-axis, sticky si.uv shouldn't move
-    apply_transformation(lambda v : mi.Transform4f.translate(v))
+    apply_transformation(lambda v : mi.Transform4f().translate(v))
     si = pi.compute_surface_interaction(ray, mi.RayFlags.All | mi.RayFlags.FollowShape)
     dr.forward(diff_vector.x)
     assert dr.allclose(dr.grad(si.uv), [0.0, 0.0], atol=1e-5)
@@ -780,19 +828,16 @@ def test18_sticky_vcall_ad_fwd(variants_all_ad_rgb, res, wall, jit_flags):
     dr.set_label(theta, 'theta')
 
     # Attach object vertices to differential parameter
-    with dr.Scope("Attach object vertices"):
-        positions_initial = dr.unravel(mi.Point3f, params[key])
-        transform = mi.Transform4f.translate(mi.Vector3f(0.0, theta, 0.0))
-        positions_new = transform @ positions_initial
-        positions_new = dr.ravel(positions_new)
-        dr.set_label(positions_new, 'positions_new')
-        del transform
-        # print(dr.graphviz_str(Float(1)))
-        params[key] = positions_new
-        params.update()
-        dr.set_label(params[key], 'positions_post_update')
-        dr.set_label(params['sphere.vertex_normals'], 'vertex_normals')
-        # print(dr.graphviz_str(Float(1)))
+    positions_initial = dr.unravel(mi.Point3f, mi.Float(params[key]))
+    transform = mi.Transform4f().translate(mi.Vector3f(0.0, theta, 0.0))
+    positions_new = transform @ positions_initial
+    positions_new = dr.ravel(positions_new)
+    dr.set_label(positions_new, 'positions_new')
+    del transform
+    params[key] = positions_new
+    params.update()
+    dr.set_label(params[key], 'positions_post_update')
+    dr.set_label(params['sphere.vertex_normals'], 'vertex_normals')
 
     spp = 1
     film_size = mi.ScalarVector2i(res)
@@ -834,10 +879,10 @@ def test19_update_geometry(variants_vec_rgb):
 
     params = mi.traverse(scene)
 
-    init_vertex_pos = dr.unravel(mi.Point3f, params['rect.vertex_positions'])
+    init_vertex_pos = dr.unravel(mi.Point3f, mi.Float(params['rect.vertex_positions']))
 
     def translate(v):
-        transform = mi.Transform4f.translate(mi.Vector3f(v))
+        transform = mi.Transform4f().translate(mi.Vector3f(v))
         positions_new = transform @ init_vertex_pos
         params['rect.vertex_positions'] = dr.ravel(positions_new)
         params.update()
@@ -879,7 +924,7 @@ def test20_write_xml(variants_all_rgb, tmp_path):
         'filename': 'resources/data/tests/ply/rectangle_normals_uv.ply'
     })
     params = mi.traverse(mesh)
-    positions = params['vertex_positions'].copy_()
+    positions = type(params['vertex_positions'])(params['vertex_positions'])
 
     # Modify one buffer, to check if JIT modes are properly evaluated when saving
     params['vertex_positions'] += 10
@@ -899,67 +944,7 @@ def test20_write_xml(variants_all_rgb, tmp_path):
 
 
 @fresolver_append_path
-def test21_boundary_test_sh_normal(variant_llvm_ad_rgb):
-    scene = mi.load_dict({
-        'type': 'scene',
-        'mesh': {
-            'type' : 'obj',
-            'filename' : 'resources/data/common/meshes/sphere.obj'
-        }
-    })
-
-    # Check boundary test value at silhouette
-    ray = mi.Ray3f([1.0, 0, -2], [0, 0, 1], 0.0, [])
-    B = scene.ray_intersect(ray, mi.RayFlags.BoundaryTest, True).boundary_test
-
-    assert dr.all(B < 1e-6)
-
-    # Check that boundary test value increase as we move away from boundary
-    N = 10
-    prev = 0.0
-    for x in range(N):
-        ray = mi.Ray3f([1.0 - float(x) / N, 0, -2], [0, 0, 1], 0.0, [])
-        B = scene.ray_intersect(ray, mi.RayFlags.BoundaryTest, True).boundary_test
-        assert dr.all(prev < B)
-        prev = B
-
-
-@fresolver_append_path
-def test22_boundary_test_face_normal(variants_all_ad_rgb):
-    scene = mi.load_dict({
-        'type': 'scene',
-        'mesh': {
-            'type' : 'obj',
-            'filename' : 'resources/data/common/meshes/rectangle.obj',
-            'face_normals': True
-        }
-    })
-
-    # Check boundary test value when no intersection
-    ray = mi.Ray3f([2, 0, -1], [0, 0, 1], 0.0, [])
-    si = scene.ray_intersect(ray, mi.RayFlags.BoundaryTest, True)
-    assert dr.all(~si.is_valid())
-    B = si.boundary_test
-    assert dr.all(B > 1e6)
-
-    # Check boundary test value close to silhouette
-    ray = mi.Ray3f([0.9999, 0.9999, -1], [0, 0, 1], 0.0, [])
-    B = scene.ray_intersect(ray, mi.RayFlags.BoundaryTest, True).boundary_test
-    assert dr.all(B < 1e-3)
-
-    # Check boundary test value close to silhouette
-    ray = mi.Ray3f([0.99999, 0.0, -1], [0, 0, 1], 0.0, [])
-    B = scene.ray_intersect(ray, mi.RayFlags.BoundaryTest, True).boundary_test
-    assert dr.all(B < 1e-4)
-
-    # Check boundary test value close far from silhouette
-    ray = mi.Ray3f([0.9, 0.0, -1], [0, 0, 1], 0.0, [])
-    B = scene.ray_intersect(ray, mi.RayFlags.BoundaryTest, True).boundary_test
-    assert dr.all(B > 1e-1)
-
-
-@fresolver_append_path
-def test23_write_stream(variants_all_rgb, tmp_path):
+def test22_write_stream(variants_all_rgb, tmp_path):
     filepath = str(tmp_path / 'test_mesh-test23_write_stream.ply')
     mesh = mi.load_dict({
         'type': 'ply',
@@ -984,31 +969,64 @@ def test23_write_stream(variants_all_rgb, tmp_path):
 
 
 @fresolver_append_path
-def test24_texture_attributes(variants_all_rgb):
+def test23_texture_attributes(variants_all_rgb):
 
     texture = mi.load_dict({
         "type": "bitmap",
         "filename" : "resources/data/common/textures/flower.bmp",
     })
-
-    mesh = mi.load_dict({
-        "type" : "obj",
-        "id" : "rect",
-        "filename" : "resources/data/common/meshes/rectangle.obj",
-        "attribute_1": texture
+    texture2 = mi.load_dict({
+        "type": "bitmap",
+        "filter_type": "nearest",
+        "data" : dr.full(mi.TensorXf, 0.3, [1, 1, 3])
     })
 
-    assert dr.all(mesh.has_attribute('attribute_1'))
-    assert not dr.any(mesh.has_attribute('foo'))
+    # Texture attributes are supported by shapes in general, not only meshes.
+    shapes = [
+        mi.load_dict({
+            "type" : "obj",
+            "filename" : "resources/data/common/meshes/rectangle.obj",
+            "attribute_1": texture
+        }),
+        mi.load_dict({
+            "type" : "sphere",
+            "attribute_1": texture
+        }),
+    ]
 
-    si = mi.SurfaceInteraction3f()
-    si.uv = mi.Point2f(0.5)
+    for shape in shapes:
+        # --- Texture attribute registered at creation
+        assert dr.all(shape.has_attribute('attribute_1'))
+        assert not dr.any(shape.has_attribute('foo'))
 
-    assert dr.allclose(mesh.eval_attribute('attribute_1', si), texture.eval(si))
+        si = mi.SurfaceInteraction3f()
+        si.uv = mi.Point2f(0.5)
+        assert dr.allclose(shape.eval_attribute('attribute_1', si), texture.eval(si))
+
+        # --- Texture attribute registered later
+        shape.add_texture_attribute('attribute_2', texture2)
+        assert dr.all(shape.has_attribute('attribute_2'))
+
+        # --- Texture attribute replacement
+        shape.add_texture_attribute('attribute_2', texture)
+        assert shape.texture_attribute('attribute_2') == texture
+        shape.add_texture_attribute('attribute_2', texture2)
+
+        # --- Texture attribute deletion
+        shape.remove_attribute('attribute_1')
+        assert not dr.any(shape.has_attribute('attribute_1'))
+        with pytest.raises(RuntimeError, match='Attribute "attribute_1" not found'):
+            shape.remove_attribute('attribute_1')
+
+        # --- Constant-valued texture attribute
+        for p in (0.0, 1.0):
+            si.uv = mi.Point2f(p)
+            assert dr.allclose(shape.eval_attribute_3('attribute_2', si), mi.Color3f(0.3))
+
 
 
 @fresolver_append_path
-def test25_flip_tex_coords_obj(variants_all_rgb, tmp_path):
+def test24_flip_tex_coords_obj(variants_all_rgb, tmp_path):
     mesh = mi.load_dict({
         'type': 'obj',
         'filename': 'resources/data/tests/obj/rectangle_uv.obj',
@@ -1031,7 +1049,7 @@ def test25_flip_tex_coords_obj(variants_all_rgb, tmp_path):
 
 
 @fresolver_append_path
-def test26_flip_tex_coords_ply(variants_all_rgb, tmp_path):
+def test25_flip_tex_coords_ply(variants_all_rgb, tmp_path):
     mesh = mi.load_dict({
         'type': 'ply',
         'filename': 'resources/data/tests/ply/rectangle_uv.ply',
@@ -1051,3 +1069,401 @@ def test26_flip_tex_coords_ply(variants_all_rgb, tmp_path):
 
     assert (uv[::2] == uv_flipped[::2]).all()
     assert (uv[1::2] == 1 - uv_flipped[1::2]).all()
+
+
+@fresolver_append_path
+def test26_sample_silhouette_wrong_type(variants_all_rgb):
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/tests/ply/triangle.ply",
+        "face_normals" : True
+    })
+    ss = mesh.sample_silhouette([0.1, 0.2, 0.3],
+                                mi.DiscontinuityFlags.InteriorType)
+
+    assert ss.discontinuity_type == mi.DiscontinuityFlags.Empty.value
+
+
+@fresolver_append_path
+def test27_sample_silhouette(variants_vec_rgb):
+    if not dr.is_diff_v(mi.Float):
+        pytest.skip("Only relevant in AD-enabled variants!")
+
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/tests/ply/triangle.ply",
+        "face_normals" : True
+    })
+    mesh_ptr = mi.ShapePtr(mesh)
+
+    params = mi.traverse(mesh)
+    dr.enable_grad(params['vertex_positions'])
+    params.update()
+
+    x = dr.linspace(mi.Float, 1e-6, 1-1e-6, 10)
+    y = dr.linspace(mi.Float, 1e-6, 1-1e-6, 10)
+    z = dr.linspace(mi.Float, 1e-6, 1-1e-6, 10)
+    samples = mi.Point3f(dr.meshgrid(x, y, z))
+
+    # Sphere
+    flags = mi.DiscontinuityFlags.PerimeterType | mi.DiscontinuityFlags.DirectionSphere
+    ss = mesh.sample_silhouette(samples, flags)
+
+    assert dr.all(ss.discontinuity_type == mi.DiscontinuityFlags.PerimeterType.value)
+    assert dr.all(ss.p.x == 0)
+    assert dr.all(
+        (ss.p.y <= 1) & (ss.p.y >= 0) &
+        (ss.p.z <= 1) & (ss.p.z >= 0)
+    )
+    assert dr.all(ss.flags == flags)
+    assert dr.allclose(dr.dot(ss.n, ss.d), 0, atol=1e-6)
+    perimeter = 2 + dr.sqrt(2)
+    assert dr.allclose(ss.pdf, dr.rcp(perimeter) * dr.inv_four_pi)
+
+    assert dr.all((dr.reinterpret_array(mi.UInt32, ss.shape) ==
+            dr.reinterpret_array(mi.UInt32, mesh_ptr)))
+
+    # Lune
+    flags = mi.DiscontinuityFlags.PerimeterType | mi.DiscontinuityFlags.DirectionLune
+    ss = mesh.sample_silhouette(samples, flags)
+
+    valid = ss.is_valid()
+    ss = dr.gather(mi.SilhouetteSample3f, ss, dr.compress(valid))
+
+    assert dr.all(ss.discontinuity_type == mi.DiscontinuityFlags.PerimeterType.value)
+    assert dr.all(ss.p.x == 0)
+    assert dr.all(
+        (ss.p.y <= 1) & (ss.p.y >= 0) &
+        (ss.p.z <= 1) & (ss.p.z >= 0)
+    )
+    assert dr.all(ss.flags == flags)
+    assert dr.allclose(dr.dot(ss.n, ss.d), 0, atol=1e-6)
+    perimeter = 2 + dr.sqrt(2)
+    assert dr.allclose(ss.pdf, dr.rcp(perimeter) * dr.inv_four_pi)
+
+    assert dr.all((dr.reinterpret_array(mi.UInt32, ss.shape) ==
+            dr.reinterpret_array(mi.UInt32, mesh_ptr)))
+
+
+@fresolver_append_path
+def test28_sample_silhouette_bijective(variants_vec_rgb):
+    if not dr.is_diff_v(mi.Float):
+        pytest.skip("Only relevant in AD-enabled variants!")
+
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/common/meshes/bunny_lowres.ply",
+    })
+
+    params = mi.traverse(mesh)
+    dr.enable_grad(params['vertex_positions'])
+    params.update()
+
+    x = dr.linspace(mi.Float, 1e-3, 1-1e-3, 10)
+    y = dr.linspace(mi.Float, 1e-3, 1-1e-3, 10)
+    z = dr.linspace(mi.Float, 1e-3, 1-1e-3, 10)
+    samples = mi.Point3f(dr.meshgrid(x, y, z))
+
+    # Sphere
+    flags = mi.DiscontinuityFlags.PerimeterType | mi.DiscontinuityFlags.DirectionSphere
+    ss = mesh.sample_silhouette(samples, flags)
+    out = mesh.invert_silhouette_sample(ss)
+    valid = ss.is_valid()
+    samples_valid = dr.gather(mi.Point3f, samples, dr.compress(valid))
+    out_valid = dr.gather(mi.Point3f, out, dr.compress(valid))
+
+    assert dr.allclose(samples_valid, out_valid, atol=1e-7)
+
+    # Lune
+    flags = mi.DiscontinuityFlags.PerimeterType | mi.DiscontinuityFlags.DirectionLune
+    ss = mesh.sample_silhouette(samples, flags)
+    out = mesh.invert_silhouette_sample(ss)
+    valid = ss.is_valid()
+    samples_valid = dr.gather(mi.Point3f, samples, dr.compress(valid))
+    out_valid = dr.gather(mi.Point3f, out, dr.compress(valid))
+
+    assert dr.allclose(samples_valid.x, out_valid.x, atol=1e-7)
+    assert dr.allclose(samples_valid.y, out_valid.y, atol=1e-4) # Lune sampling is not numerically robust
+    assert dr.allclose(samples_valid.z, out_valid.z, atol=1e-7)
+
+
+@fresolver_append_path
+def test29_discontinuity_types(variants_vec_rgb):
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/tests/ply/triangle.ply",
+        "face_normals" : True
+    })
+
+    types = mesh.silhouette_discontinuity_types()
+    assert not mi.has_flag(types, mi.DiscontinuityFlags.InteriorType)
+    assert mi.has_flag(types, mi.DiscontinuityFlags.PerimeterType)
+
+
+@fresolver_append_path
+def test30_differential_motion(variants_vec_rgb):
+    if not dr.is_diff_v(mi.Float):
+        pytest.skip("Only relevant in AD-enabled variants!")
+
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/common/meshes/bunny_lowres.ply",
+    })
+    params = mi.traverse(mesh)
+
+    theta = mi.Point3f(0.0)
+    dr.enable_grad(theta)
+    key = 'vertex_positions'
+    positions = dr.unravel(mi.Point3f, mi.Float(params[key]))
+    translation = mi.Transform4f().translate([theta.x, 2 * theta.y, 3 * theta.z])
+    positions = translation @ positions
+    params[key] = dr.ravel(positions)
+    params.update()
+
+    si = dr.zeros(mi.SurfaceInteraction3f)
+    si.prim_index = 0
+    si.p = mi.Point3f(1, 0, 0) # doesn't matter
+    si.uv = mi.Point2f(0.5, 0.5)
+
+    p_diff = mesh.differential_motion(si)
+    dr.forward(theta)
+    v = dr.grad(p_diff)
+
+    assert dr.allclose(p_diff, si.p)
+    assert dr.allclose(v, [1.0, 2.0, 3.0])
+
+
+@fresolver_append_path
+def test31_primitive_silhouette_projection(variants_vec_rgb):
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/tests/ply/rectangle_uv.ply",
+    })
+    mesh.build_directed_edges()
+
+    u = dr.linspace(mi.Float, 1e-6, 1-1e-6, 10)
+    v = dr.linspace(mi.Float, 1e-6, 1-1e-6, 10)
+    uv = mi.Point2f(dr.meshgrid(u, v))
+    si = mesh.eval_parameterization(uv)
+
+    viewpoint = mi.Point3f(0, 0, 5)
+
+    sample = dr.linspace(mi.Float, 1e-6, 1-1e-6, dr.width(uv))
+    ss = mesh.primitive_silhouette_projection(
+        viewpoint, si, mi.DiscontinuityFlags.PerimeterType, sample, si.is_valid())
+
+    valid = ss.is_valid()
+    ss = dr.gather(mi.SilhouetteSample3f, ss, dr.compress(valid))
+
+    assert dr.all(ss.discontinuity_type == mi.DiscontinuityFlags.PerimeterType.value)
+    assert dr.allclose(dr.dot(ss.n, ss.d), 0, atol=1e-6)
+
+    mesh_ptr = mi.ShapePtr(mesh)
+    assert dr.all((dr.reinterpret_array(mi.UInt32, ss.shape) ==
+                   dr.reinterpret_array(mi.UInt32, mesh_ptr)))
+
+
+@fresolver_append_path
+def test32_shape_type(variants_all_rgb):
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/tests/ply/rectangle_uv.ply",
+    })
+    assert mesh.shape_type() == mi.ShapeType.Mesh
+
+    if dr.is_jit_v(mi.Float):
+        scene = mixed_shapes_scene()
+        types = scene.shapes_dr().shape_type()
+        assert dr.count(types == mi.ShapeType.Mesh.value) == 2
+
+
+@fresolver_append_path
+def test33_rebuild_area_pmf(variants_vec_rgb):
+    mesh = mi.load_dict({
+        "type" : "ply",
+        "filename" : "resources/data/tests/ply/triangle.ply",
+        "face_normals" : True
+    })
+
+    surface_area_before = mesh.surface_area()
+
+    params = mi.traverse(mesh)
+    key = 'vertex_positions'
+
+    vertices = dr.unravel(mi.Point3f, mi.Float(params[key]))
+    new_vertices = mi.Transform4f().scale(2) @ vertices
+    params[key] = dr.ravel(new_vertices)
+    params.update()
+
+    surface_area_after = mesh.surface_area()
+
+    assert surface_area_after == 4 * surface_area_before
+
+
+
+@fresolver_append_path
+def test34_mesh_ptr(variants_vec_rgb):
+    # dr.set_flag(dr.JitFlag.Debug, True)
+    scene = mixed_shapes_scene()
+    shapes_dr = scene.shapes_dr()
+
+    for i, sh in enumerate(scene.shapes()):
+        as_mesh = mi.MeshPtr(sh)
+        if sh.is_mesh():
+            assert dr.all(dr.gather(mi.MeshPtr, shapes_dr, i) == as_mesh)
+            assert as_mesh[0] == shapes_dr[i]
+            assert as_mesh[0] == sh
+        else:
+            assert dr.all(dr.reinterpret_array(mi.UInt32, as_mesh) == 0)
+            assert as_mesh[0] is None
+
+    # The `MeshPtr` constructor should automatically zero-out non-Mesh entries.
+    meshes = mi.MeshPtr(shapes_dr)
+    is_nnz = dr.reinterpret_array(mi.UInt32, meshes) != 0
+    assert dr.all(is_nnz == (True, False, True))
+
+    # It should be possible to construct an empty MeshPtr.
+    assert dr.width(mi.ShapePtr()) == 0
+    assert dr.width(mi.MeshPtr()) == 0
+    assert dr.width(dr.zeros(mi.MeshPtr, 0)) == 0
+    assert dr.width(dr.empty(mi.MeshPtr, 0)) == 0
+
+    # It should be possible to reshape down to zero elements.
+    a = dr.zeros(mi.MeshPtr, 4)
+    b = dr.reshape(mi.MeshPtr, a, 0, shrink=True)
+    assert dr.width(b) == 0
+
+
+@fresolver_append_path
+def test35_mesh_vcalls(variants_vec_rgb):
+    scene = mixed_shapes_scene()
+    expected_ordering = [("shape1", True), ("shape2", False), ("shape3", True)]
+    for i, sh in enumerate(scene.shapes()):
+        assert (sh.id(), sh.is_mesh()) == expected_ordering[i]
+        if sh.is_mesh():
+            sh.build_directed_edges()
+
+    shapes = scene.shapes_dr()
+    meshes = mi.MeshPtr(shapes)
+
+    # Not strictly needed, since the non-Mesh pointers
+    # should already have been zeroed-out.
+    active = shapes.is_mesh()
+    assert dr.all(active == mi.Mask([True, False, True]))
+
+    # Shapes in the scene are: Mesh, Rectangle, Mesh
+    assert dr.all(meshes.vertex_count() == [4, 0, 4])
+    assert dr.all(meshes.face_count() == [2, 0, 2])
+    assert dr.all(meshes.has_vertex_normals() == active)
+    assert dr.all(meshes.has_vertex_texcoords() == active)
+    assert not dr.any(meshes.has_mesh_attributes())
+    assert not dr.any(meshes.has_face_normals())
+    assert dr.all(meshes.has_flipped_normals() == [False, False, True])
+
+    idx = mi.UInt32([0, 99, 1])
+    face_idx = meshes.face_indices(idx, active=active)
+    edge_idx = meshes.edge_indices(idx, idx, active=active)
+    positions = meshes.vertex_position(idx, active=active)
+    normals = meshes.vertex_normal(idx, active=active)
+    texcoords = meshes.vertex_texcoord(idx, active=active)
+    face_normals = meshes.face_normal(idx, active=active)
+    opposite = meshes.opposite_dedge(idx, active=active)
+
+    dr.schedule(face_idx, edge_idx, positions, normals, texcoords,
+                face_normals, opposite)
+
+    # Check the vcall results against direct calls on the
+    # individual Mesh instances.
+    for i, sh in enumerate(scene.shapes()):
+        if not sh.is_mesh():
+            continue
+        idx_i = dr.gather(mi.UInt32, idx, i)
+        assert dr.all(dr.gather(type(face_idx), face_idx, i)
+                      == sh.face_indices(idx_i))
+        assert dr.all(dr.gather(type(edge_idx), edge_idx, i)
+                      == sh.edge_indices(idx_i, idx_i))
+        assert dr.all(dr.gather(type(positions), positions, i)
+                      == sh.vertex_position(idx_i))
+        assert dr.all(dr.gather(type(normals), normals, i)
+                      == sh.vertex_normal(idx_i))
+        assert dr.all(dr.gather(type(texcoords), texcoords, i)
+                      == sh.vertex_texcoord(idx_i))
+        assert dr.all(dr.gather(type(face_normals), face_normals, i)
+                      == sh.face_normal(idx_i))
+        assert dr.all(dr.gather(type(opposite), opposite, i)
+                      == sh.opposite_dedge(idx_i))
+
+
+@fresolver_append_path
+def test36_mesh_vcalls_with_directed_edges(variants_vec_rgb):
+    """
+    Test a special case where some meshes have their E2E data structure
+    initialized and others don't. Virtual function calls involving only
+    the initialized meshes should work.
+    """
+    scene = mi.load_dict({
+        "type": "scene",
+        "mesh1": {
+            "type": "ply",
+            "filename": "resources/data/tests/ply/cbox_smallbox.ply",
+        },
+        "mesh2": {
+            "type": "ply",
+            "filename": "resources/data/tests/ply/cbox_smallbox.ply",
+        },
+    })
+
+    # Second mesh will *not* have a valid E2E data structure.
+    mesh_ptr = dr.gather(mi.MeshPtr, scene.shapes_dr(), dr.zeros(mi.UInt32, 3))
+    mesh_ptr[0].build_directed_edges()
+
+    result = mesh_ptr.opposite_dedge(mi.UInt32([2, 3, 2]))
+    assert dr.all(result == mi.UInt32([3, 2, 3]))
+
+
+def test37_create_mesh_with_properties(variant_scalar_rgb):
+    m = mi.Mesh(mi.Properties())
+    assert str(m) == """Mesh[
+  name = "",
+  bbox = BoundingBox3f[invalid],
+  vertex_count = 0,
+  vertices = [0 B of vertex data],
+  face_count = 0,
+  faces = [0 B of face data],
+  face_normals = 0,
+  bsdf = SmoothDiffuse[
+    reflectance = UniformSpectrum[value=0.500000]
+  ]
+]"""
+
+def test38_ray_intersect_triangle(variants_all_rgb):
+    mesh = mi.Mesh(name='', vertex_count=3, face_count=1)
+    params = mi.traverse(mesh)
+    params['vertex_positions'] = [
+        0.0, 0.0, 0.0, 
+        1.0, 0.0, 0.0,
+        0.5, 1.0, 0.0,
+    ]
+    params['faces'] = [0, 1, 2]
+    params.update()
+
+    ray = mi.Ray3f([0.5, 0.5, 1.0], [0.0, 0.0, -1.0])
+
+    pi = mesh.ray_intersect_triangle(mi.UInt32(0), ray)
+    assert dr.all(dr.abs(pi.t - 1) <= 1e-12)
+    assert dr.all(pi.prim_index == 0)
+
+def test39_custom_vertex_normals(variants_vec_rgb):
+    m = mi.Mesh(mi.Properties())
+    normals = dr.linspace(mi.Float, -1, 1, 12)
+    params = mi.traverse(m)
+    params['vertex_positions'] = [0.0, 0.0, 0.0,
+                                  1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0]
+    params['faces'] = [0, 1, 2, 1, 2, 3]
+    params['vertex_normals'] = normals
+    params.update()
+    assert m.has_vertex_normals()
+    params = mi.traverse(m)
+
+    # The custom vertex normals should not have been modified.
+    assert dr.allclose(params['vertex_normals'], normals)

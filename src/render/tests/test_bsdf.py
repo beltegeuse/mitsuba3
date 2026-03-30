@@ -7,7 +7,7 @@ import numpy as np
 def test01_ctx_construct(variant_scalar_rgb):
     ctx = mi.BSDFContext()
     assert ctx.type_mask == +mi.BSDFFlags.All
-    assert ctx.component == np.uint32(-1)
+    assert ctx.component == np.iinfo(np.uint32).max
     assert ctx.mode == mi.TransportMode.Radiance
     ctx.reverse()
     assert ctx.mode == mi.TransportMode.Importance
@@ -49,10 +49,10 @@ def test03_bsdf_attributes(variants_vec_backends_once_rgb):
     class DummyBSDF(mi.BSDF):
         def __init__(self, props):
             mi.BSDF.__init__(self, props)
-            self.tint = props['tint']
+            self.tint = props.get_texture('tint')
 
-        def traverse(self, callback):
-            callback.put_object('tint', self.tint, mi.ParamFlags.Differentiable)
+        def traverse(self, cb):
+            cb.put('tint', self.tint, mi.ParamFlags.Differentiable)
 
     mi.register_bsdf('dummy', DummyBSDF)
 

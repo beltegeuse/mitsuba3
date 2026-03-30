@@ -4,14 +4,17 @@
 #include <mitsuba/core/spectrum.h>
 #include <mitsuba/core/traits.h>
 #include <mitsuba/render/fwd.h>
-#include <drjit/vcall.h>
+#include <drjit/call.h>
 
 NAMESPACE_BEGIN(mitsuba)
 
 template <typename Float, typename Spectrum>
-class MI_EXPORT_LIB Medium : public Object {
+class MI_EXPORT_LIB Medium : public JitObject<Medium<Float, Spectrum>> {
 public:
     MI_IMPORT_TYPES(PhaseFunction, Sampler, Scene, Texture);
+
+    /// Destructor
+    ~Medium();
 
     /// Intersects a ray with the medium's bounding box
     virtual std::tuple<Mask, Float, Float>
@@ -88,49 +91,42 @@ public:
 
     void traverse(TraversalCallback *callback) override;
 
-    /// Return a string identifier
-    std::string id() const override { return m_id; }
-
-    /// Set a string identifier
-    void set_id(const std::string& id) override { m_id = id; };
-
     /// Return a human-readable representation of the Medium
     std::string to_string() const override = 0;
 
-    DRJIT_VCALL_REGISTER(Float, mitsuba::Medium)
+    MI_DECLARE_PLUGIN_BASE_CLASS(Medium)
 
-    MI_DECLARE_CLASS()
 protected:
     Medium();
     Medium(const Properties &props);
-    virtual ~Medium();
 
 protected:
     ref<PhaseFunction> m_phase_function;
-    bool m_sample_emitters, m_is_homogeneous, m_has_spectral_extinction;
+    bool m_sample_emitters;
+    bool m_is_homogeneous;
+    bool m_has_spectral_extinction;
 
-    /// Identifier (if available)
-    std::string m_id;
+    MI_DECLARE_TRAVERSE_CB(m_phase_function)
 };
 
 MI_EXTERN_CLASS(Medium)
 NAMESPACE_END(mitsuba)
 
 // -----------------------------------------------------------------------
-//! @{ \name Dr.Jit support for packets of Medium pointers
+//! @{ \name Enables vectorized method calls on Dr.Jit medium arrays
 // -----------------------------------------------------------------------
 
-DRJIT_VCALL_TEMPLATE_BEGIN(mitsuba::Medium)
-    DRJIT_VCALL_GETTER(phase_function, const typename Class::PhaseFunction*)
-    DRJIT_VCALL_GETTER(use_emitter_sampling, bool)
-    DRJIT_VCALL_GETTER(is_homogeneous, bool)
-    DRJIT_VCALL_GETTER(has_spectral_extinction, bool)
-    DRJIT_VCALL_METHOD(get_majorant)
-    DRJIT_VCALL_METHOD(intersect_aabb)
-    DRJIT_VCALL_METHOD(sample_interaction)
-    DRJIT_VCALL_METHOD(transmittance_eval_pdf)
-    DRJIT_VCALL_METHOD(get_scattering_coefficients)
-DRJIT_VCALL_TEMPLATE_END(mitsuba::Medium)
+DRJIT_CALL_TEMPLATE_BEGIN(mitsuba::Medium)
+    DRJIT_CALL_GETTER(phase_function)
+    DRJIT_CALL_GETTER(use_emitter_sampling)
+    DRJIT_CALL_GETTER(is_homogeneous)
+    DRJIT_CALL_GETTER(has_spectral_extinction)
+    DRJIT_CALL_METHOD(get_majorant)
+    DRJIT_CALL_METHOD(intersect_aabb)
+    DRJIT_CALL_METHOD(sample_interaction)
+    DRJIT_CALL_METHOD(transmittance_eval_pdf)
+    DRJIT_CALL_METHOD(get_scattering_coefficients)
+DRJIT_CALL_END()
 
 //! @}
 // -----------------------------------------------------------------------

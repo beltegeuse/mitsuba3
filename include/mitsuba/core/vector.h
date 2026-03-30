@@ -1,5 +1,7 @@
 #pragma once
 
+#include <drjit/sphere.h>
+#include <drjit/math.h>
 #include <drjit/packet.h>
 #include <mitsuba/core/simd.h>
 
@@ -128,11 +130,39 @@ template <typename Vector3f> std::pair<Vector3f, Vector3f> coordinate_system(con
           b    = n.x() * n.y() * a;
 
     return {
-        Vector3f(dr::mulsign(dr::sqr(n.x()) * a, n.z()) + 1,
+        Vector3f(dr::mulsign(dr::square(n.x()) * a, n.z()) + 1,
                  dr::mulsign(b, n.z()),
                  dr::mulsign_neg(n.x(), n.z())),
         Vector3f(b, dr::fmadd(n.y(), n.y() * a, sign), -n.y())
     };
+}
+
+/**
+ * \brief Converts a unit vector to its spherical coordinates parameterization
+ *
+ * \param v
+ *      Vector to convert
+ * \return
+ *      The polar and azimuthal angles respectively.
+ */
+template <typename Value>
+MI_INLINE Point<Value, 2> dir_to_sph(const Vector<Value, 3> &v) {
+    return { dr::unit_angle_z(v), dr::atan2(v.y(), v.x()) };
+}
+
+/**
+ * \brief Converts spherical coordinates to a cartesian vector
+ *
+ * \param theta
+ *      The polar angle
+ * \param phi
+ *      The azimuth angle
+ * \return
+ *      Unit vector corresponding to the input angles
+ */
+template <typename Value>
+MI_INLINE Vector<Value, 3> sph_to_dir(const Value &theta, const Value &phi) {
+    return dr::sphdir<Value>(theta, phi);
 }
 
 NAMESPACE_END(mitsuba)

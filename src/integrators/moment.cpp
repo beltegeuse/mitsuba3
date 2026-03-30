@@ -45,18 +45,19 @@ public:
 
     MomentIntegrator(const Properties &props) : Base(props) {
         // Get the nested integrators and their AOVs
-        for (auto &kv : props.objects()) {
-            Base *integrator = dynamic_cast<Base *>(kv.second.get());
+        for (auto &prop : props.objects()) {
+            Base *integrator = prop.try_get<Base>();
             if (!integrator)
                 Throw("Child objects must be of type 'SamplingIntegrator'!");
+            std::string name(prop.name());
             std::vector<std::string> aovs = integrator->aov_names();
-            for (auto name: aovs)
-                m_aov_names.push_back(kv.first + "." + name);
+            for (auto aov_name: aovs)
+                m_aov_names.push_back(name + "." + aov_name);
             m_integrators.push_back({ integrator, aovs.size() });
 
-            m_aov_names.push_back(kv.first + ".X");
-            m_aov_names.push_back(kv.first + ".Y");
-            m_aov_names.push_back(kv.first + ".Z");
+            m_aov_names.push_back(name + ".X");
+            m_aov_names.push_back(name + ".Y");
+            m_aov_names.push_back(name + ".Z");
         }
 
         // For every AOV, add a corresponding "m2_" AOV
@@ -93,7 +94,7 @@ public:
                 static_assert(is_spectral_v<Spectrum>);
                 /// Note: this assumes that sensor used sample_rgb_spectrum() to generate 'ray.wavelengths'
                 auto pdf = pdf_rgb_spectrum(ray.wavelengths);
-                spec_u *= dr::select(dr::neq(pdf, 0.f), dr::rcp(pdf), 0.f);
+                spec_u *= dr::select(pdf != 0.f, dr::rcp(pdf), 0.f);
                 xyz = spectrum_to_xyz(spec_u, ray.wavelengths, active);
             }
 
@@ -101,7 +102,7 @@ public:
 
             // Write second moment AOVs
             for (size_t j = 0; j < m_integrators[i].second + 3; j++)
-                *(aovs - j + offset - 1) = dr::sqr(*(aovs - j - 1));
+                *(aovs - j + offset - 1) = dr::square(*(aovs - j - 1));
 
             if (i == 0)
                 result = result_sub;
@@ -114,11 +115,11 @@ public:
         return m_aov_names;
     }
 
-    void traverse(TraversalCallback *callback) override {
+    void traverse(TraversalCallback *cb) override {
         for (size_t i = 0; i < m_integrators.size(); ++i)
-            callback->put_object("integrator_" + std::to_string(i),
+            cb->put("integrator_" + std::to_string(i),
                                  m_integrators[i].first.get(),
-                                 +ParamFlags::Differentiable);
+                                 ParamFlags::Differentiable);
     }
 
     std::string to_string() const override {
@@ -137,12 +138,13 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(MomentIntegrator)
 private:
     std::vector<std::string> m_aov_names;
     std::vector<std::pair<ref<Base>, size_t>> m_integrators;
+
+    MI_TRAVERSE_CB(Base, m_integrators)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(MomentIntegrator, SamplingIntegrator)
-MI_EXPORT_PLUGIN(MomentIntegrator, "Moment integrator");
+MI_EXPORT_PLUGIN(MomentIntegrator)
 NAMESPACE_END(mitsuba)

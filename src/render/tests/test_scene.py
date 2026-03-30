@@ -90,14 +90,12 @@ def test03_shapes_parameters_grad_enabled(variant_cuda_ad_rgb):
     # Only parameters of the shape should affect the result of that method
     bsdf_param_key = 'box.bsdf.reflectance.value'
     dr.enable_grad(params[bsdf_param_key])
-    params.set_dirty(bsdf_param_key)
     params.update()
     assert scene.shapes_grad_enabled() == False
 
     # When setting one of the shape's param to require gradient, method should return True
     shape_param_key = 'box.vertex_positions'
     dr.enable_grad(params[shape_param_key])
-    params.set_dirty(shape_param_key)
     params.update()
     assert scene.shapes_grad_enabled() == True
 
@@ -115,7 +113,7 @@ def test04_scene_destruction_and_pending_raytracing(variants_vec_rgb, shadow):
             'integrator': { 'type': 'path' },
             'mysensor': {
                 'type': 'perspective',
-                'to_world': T.look_at(origin=[0, 0, 3], target=[0, 0, 0], up=[0, 1, 0]),
+                'to_world': T().look_at(origin=[0, 0, 3], target=[0, 0, 0], up=[0, 1, 0]),
                 'myfilm': {
                     'type': 'hdrfilm',
                     'rfilter': { 'type': 'box'},
@@ -246,3 +244,124 @@ def test09_test_emitter_sampling_weight_update(variants_all_backends_once):
     assert dr.allclose(scene.pdf_emitter(0), pdf[0])
     assert dr.allclose(scene.pdf_emitter(1), pdf[1])
     assert dr.allclose(scene.pdf_emitter(2), pdf[2])
+
+
+def test10_test_scene_bbox_update(variant_scalar_rgb):
+    scene = mi.load_dict({
+        'type': 'scene',
+        "sphere" : {
+            "type" : "sphere"
+        }
+    })
+
+    bbox = scene.bbox()
+    params = mi.traverse(scene)
+    offset = [-1, -1, -1]
+    params['sphere.to_world'] = mi.Transform4f().translate(offset)
+    params.update()
+
+    expected = mi.BoundingBox3f(bbox.min + offset, bbox.max + offset)
+    assert expected == scene.bbox()
+
+
+def test11_sample_silhouette_bijective(variants_all_ad_rgb):
+    scene = mi.load_dict({
+        'type': 'scene',
+        'sphere' : {
+            'type' : 'sphere'
+        },
+        'rectangle' : {
+            'type' : 'rectangle'
+        },
+        'cylinder' : {
+            'type' : 'cylinder'
+        }
+    })
+
+    params = mi.traverse(scene)
+    key_sphere = 'sphere.to_world'
+    key_rectangle = 'rectangle.to_world'
+    key_cylinder = 'cylinder.to_world'
+
+    # Make sure every shape is being differentiated
+    dr.enable_grad(params[key_sphere])
+    dr.enable_grad(params[key_rectangle])
+    dr.enable_grad(params[key_cylinder])
+    params.update()
+
+    x = dr.linspace(mi.Float, 1e-6, 1-1e-6, 3)
+    y = dr.linspace(mi.Float, 1e-6, 1-1e-6, 2)
+    z = dr.linspace(mi.Float, 1e-6, 1-1e-6, 2)
+    samples = mi.Point3f(dr.meshgrid(x, y, z))
+
+    # Only interior
+    ss = scene.sample_silhouette(samples, mi.DiscontinuityFlags.InteriorType)
+    out = scene.invert_silhouette_sample(ss)
+    valid = ss.is_valid()
+    valid_samples = dr.gather(mi.Point3f, samples, dr.arange(mi.UInt32, dr.width(ss)), valid)
+    valid_out = dr.gather(mi.Point3f, out, dr.arange(mi.UInt32, dr.width(ss)), valid)
+    assert dr.allclose(valid_samples, valid_out, atol=1e-6)
+
+    ## Only perimeter
+    ss = scene.sample_silhouette(samples, mi.DiscontinuityFlags.PerimeterType)
+    out = scene.invert_silhouette_sample(ss)
+    valid = ss.is_valid()
+    valid_samples = dr.gather(mi.Point3f, samples, dr.arange(mi.UInt32, dr.width(ss)), valid)
+    valid_out = dr.gather(mi.Point3f, out, dr.arange(mi.UInt32, dr.width(ss)), valid)
+    assert dr.allclose(valid_samples, valid_out, atol=1e-6)
+
+    # Both types
+    ss = scene.sample_silhouette(samples, mi.DiscontinuityFlags.AllTypes)
+    out = scene.invert_silhouette_sample(ss)
+    assert dr.all(ss.discontinuity_type != mi.DiscontinuityFlags.Empty.value)
+    assert dr.allclose(valid_samples, valid_out, atol=1e-6)
+
+
+def test12_enable_embree_robust_flag(variants_any_llvm):
+
+    # We intersect rays against two adjacent triangles. The rays hit exactly
+    # the edge between two triangles, which Embree will not count as an
+    # intersection if the "robust" flag is not set.
+    R = mi.Transform4f().rotate(dr.normalize(mi.Vector3f(1, 1, 1)), 90)
+    vertices = mi.Vector3f(
+        [0.0, 1.0, 0.0, 1.0], [0.0, 0.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0])
+    vertices = R @ vertices
+
+    mesh = mi.Mesh("MyMesh", 4, 2)
+    params = mi.traverse(mesh)
+    params['vertex_positions'] = dr.ravel(vertices)
+    params['faces'] = [0, 1, 2, 1, 3, 2]
+    params.update()
+
+    u, v = dr.meshgrid(dr.linspace(mi.Float, 0.05, 0.95, 32),
+                       dr.linspace(mi.Float, 0.05, 0.95, 32))
+    d = mi.warp.square_to_cosine_hemisphere(mi.Vector2f(u, v))
+    ray = R @ mi.Ray3f(mi.Point3f(0.5, 0.5, 0.0) + d, -d)
+
+    scene = mi.load_dict({'type': 'scene', 'mesh': mesh})
+    assert dr.any(~scene.ray_intersect(ray).is_valid())
+
+    scene = mi.load_dict({'type': 'scene', 'mesh': mesh,
+                          'embree_use_robust_intersections': True})
+    assert dr.all(scene.ray_intersect(ray).is_valid())
+
+
+@fresolver_append_path
+def test13_mitsuba_object_multiple_python_repr(variants_vec_rgb):
+    """Tests that a Object* can be accesed throught multiple Python objects of
+    different types."""
+
+    scene = mi.load_dict({
+        "type" : "scene",
+        "box" :  {
+            "type" : "obj",
+            "filename" : "resources/data/tests/obj/cbox_smallbox.obj"
+        },
+    })
+
+    box_as_shape = scene.shapes_dr()[0]
+    box_as_mesh = scene.shapes()[0]
+
+    assert type(box_as_mesh) == mi.Mesh
+    assert type(box_as_shape) == mi.Shape
+

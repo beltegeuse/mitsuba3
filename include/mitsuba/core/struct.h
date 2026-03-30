@@ -1,7 +1,8 @@
 #pragma once
 
-#include <drjit/array_router.h>
+#include <drjit/array.h>
 #include <mitsuba/core/object.h>
+#include <string>
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -279,7 +280,7 @@ public:
     /// Return the representable range of the given type
     static std::pair<double, double> range(Type type);
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(Struct)
 protected:
     std::vector<Field> m_fields;
     bool m_pack;
@@ -407,7 +408,10 @@ public:
     /// Return a string representation
     std::string to_string() const override;
 
-    MI_DECLARE_CLASS()
+    /// Free static resources
+    static void static_shutdown();
+
+    MI_DECLARE_CLASS(Struct)
 protected:
 
 #if MI_STRUCTCONVERTER_USE_JIT == 0

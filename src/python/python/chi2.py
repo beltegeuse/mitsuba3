@@ -75,7 +75,6 @@ class ChiSquareTest:
     """
     def __init__(self, domain, sample_func, pdf_func, sample_dim=2,
                  sample_count=1000000, res=101, ires=4, seed=0):
-
         assert res > 0
         assert ires >= 2, "The 'ires' parameter must be >= 2!"
 
@@ -145,8 +144,8 @@ class ChiSquareTest:
 
         # Normalize position values
         xy = (xy - self.bounds.min) / self.bounds.extents()
-        xy = mi.Vector2u(dr.clamp(xy * mi.Vector2f(self.res), 0,
-                                  mi.Vector2f(self.res - 1)))
+        xy = mi.Vector2u(dr.clip(xy * mi.Vector2f(self.res), 0,
+                                 mi.Vector2f(self.res - 1)))
 
         # Compute a histogram of the positions in the parameter domain
         self.histogram = dr.zeros(mi.Float, dr.prod(self.res))
@@ -206,8 +205,8 @@ class ChiSquareTest:
         p += (sample_index_2d + 1e-4) * (1-2e-4) * sample_spacing
 
         # Trapezoid rule integration weights
-        weights = dr.prod(dr.select(dr.eq(sample_index_2d, 0) |
-                                     dr.eq(sample_index_2d, self.ires - 1), 0.5, 1))
+        weights = dr.prod(dr.select((sample_index_2d == 0) |
+                                    (sample_index_2d == self.ires - 1), 0.5, 1))
         weights *= dr.prod(sample_spacing) * self.sample_count
 
         # Remap onto the target domain
@@ -277,7 +276,7 @@ class ChiSquareTest:
             self._log('Failure: The number of degrees of freedom is too low!')
             self.fail = True
 
-        if dr.any(dr.eq(pdf, 0) & dr.neq(histogram, 0)):
+        if dr.any((pdf == 0) & (histogram != 0)):
             self._log('Failure: Found samples in a cell with expected '
                       'frequency 0. Rejecting the null hypothesis!')
             self.fail = True
@@ -297,7 +296,7 @@ class ChiSquareTest:
 
         # Probability of observing a test statistic at least as
         # extreme as the one here assuming that the distributions match
-        self.p_value = 1 - mi.math.rlgamma(dof / 2, chi2val / 2)
+        self.p_value = 1 - mi.math_py.rlgamma(dof / 2, chi2val / 2)
 
         # Apply the Šidák correction term, since we'll be conducting multiple
         # independent hypothesis tests. This accounts for the fact that the
@@ -475,15 +474,16 @@ def SpectrumAdapter(value):
     return sample_functor, pdf_functor
 
 
-def BSDFAdapter(bsdf_type, extra, wi=[0, 0, 1], ctx=None):
+def BSDFAdapter(bsdf_type, extra, wi=[0, 0, 1], uv=[0.5, 0.5], ctx=None):
     """
     Adapter to test BSDF sampling using the Chi^2 test.
 
     Parameter ``bsdf_type`` (string):
         Name of the BSDF plugin to instantiate.
 
-    Parameter ``extra`` (string):
-        Additional XML used to specify the BSDF's parameters.
+    Parameter ``extra`` (string|dict):
+        Additional XML used to specify the BSDF's parameters, or a Python
+        dictionary as used by the ``load_dict`` routine.
 
     Parameter ``wi`` (array(3,)):
         Incoming direction, in local coordinates.
@@ -495,22 +495,27 @@ def BSDFAdapter(bsdf_type, extra, wi=[0, 0, 1], ctx=None):
     def make_context(n):
         si = dr.zeros(mi.SurfaceInteraction3f, n)
         si.wi = wi
+        si.uv = uv
         return (si, ctx)
 
     def instantiate(args):
-        xml = """<bsdf version="3.0.0" type="%s">
-            %s
-        </bsdf>""" % (bsdf_type, extra)
-        return mi.load_string(xml % args)
+        if isinstance(extra, dict):
+            assert extra['type'] == bsdf_type
+            return mi.load_dict(extra)
+        else:
+            xml = """<bsdf version="3.0.0" type="%s">
+                %s
+            </bsdf>""" % (bsdf_type, extra)
+            return mi.load_string(xml % args)
 
     def sample_functor(sample, *args):
         n = dr.width(sample)
         plugin = instantiate(args)
         (si, ctx) = make_context(n)
-        bs, weight = plugin.sample(ctx, si, sample[0], [sample[1], sample[2]])
+        bs, weight = plugin.sample(ctx, si, sample[0], mi.Vector2f([sample[1], sample[2]]))
 
         w = dr.full(mi.Float, 1.0, dr.width(weight))
-        w[dr.all(dr.eq(weight, 0))] = 0
+        w[dr.all(weight == 0)] = 0
         return bs.wo, w
 
     def pdf_functor(wo, *args):
@@ -529,15 +534,20 @@ def EmitterAdapter(emitter_type, extra):
     Parameter ``emitter_type`` (string):
         Name of the emitter plugin to instantiate.
 
-    Parameter ``extra`` (string):
-        Additional XML used to specify the emitter's parameters.
+    Parameter ``extra`` (string|dict):
+        Additional XML used to specify the emitter's parameters, or a Python
+        dictionary as used by the ``load_dict`` routine.
     """
 
     def instantiate(args):
-        xml = """<emitter version="3.0.0" type="%s">
-            %s
-        </emitter>""" % (emitter_type, extra)
-        return mi.load_string(xml % args)
+        if isinstance(extra, dict):
+            assert extra['type'] == emitter_type
+            return mi.load_dict(extra)
+        else:
+            xml = """<emitter version="3.0.0" type="%s">
+                %s
+            </emitter>""" % (emitter_type, extra)
+            return mi.load_string(xml % args)
 
     def sample_functor(sample, *args):
         n = dr.width(sample)
@@ -567,7 +577,7 @@ def MicrofacetAdapter(md_type, alpha, sample_visible=False):
         wi = [0, 0, 1]
         if len(args) == 1:
             angle = args[0] * dr.pi / 180
-            wi = [dr.sin(angle), 0, dr.cos(angle)]
+            wi = mi.Vector3f([dr.sin(angle), 0, dr.cos(angle)])
         return mi.MicrofacetDistribution(md_type, alpha, sample_visible), wi
 
     def sample_functor(sample, *args):
@@ -589,15 +599,16 @@ def PhaseFunctionAdapter(phase_type, extra, wi=[0, 0, 1], ctx=None):
     Parameter ``phase_type`` (string):
         Name of the phase function plugin to instantiate.
 
-    Parameter ``extra`` (string):
-        Additional XML used to specify the phase function's parameters.
+    Parameter ``extra`` (string|dict):
+        Additional XML used to specify the phase function's parameters, or a
+        Python dictionary as used by the ``load_dict`` routine.
 
     Parameter ``wi`` (array(3,)):
         Incoming direction, in local coordinates.
     """
 
     if ctx is None:
-        ctx = mi.PhaseFunctionContext(None)
+        ctx = mi.PhaseFunctionContext()
 
     def make_context(n):
         mei = dr.zeros(mi.MediumInteraction3f, n)
@@ -607,18 +618,22 @@ def PhaseFunctionAdapter(phase_type, extra, wi=[0, 0, 1], ctx=None):
         return mei, ctx
 
     def instantiate(args):
-        xml = """<phase version="3.0.0" type="%s">
-            %s
-        </phase>""" % (phase_type, extra)
-        return mi.load_string(xml % args)
+        if isinstance(extra, dict):
+            assert extra['type'] == phase_type
+            return mi.load_dict(extra)
+        else:
+            xml = """<phase version="3.0.0" type="%s">
+                %s
+            </phase>""" % (phase_type, extra)
+            return mi.load_string(xml % args)
 
     def sample_functor(sample, *args):
         n = dr.width(sample)
         plugin = instantiate(args)
         mei, ctx = make_context(n)
-        wo, weight, pdf = plugin.sample(ctx, mei, sample[0], [sample[1], sample[2]])
+        wo, weight, pdf = plugin.sample(ctx, mei, sample[0], mi.Vector2f([sample[1], sample[2]]))
         w = dr.full(mi.Float, 1.0, dr.width(pdf))
-        w[dr.eq(pdf, 0)] = 0
+        w[pdf == 0] = 0
         return wo, w
 
     def pdf_functor(wo, *args):

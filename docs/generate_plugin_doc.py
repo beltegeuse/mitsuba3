@@ -12,17 +12,18 @@ SHAPE_ORDERING = [
     'obj',
     'ply',
     'serialized',
-    'cube'
+    'cube',
     'sphere',
+    'rectangle',
     'disk',
     'cylinder',
     'bsplinecurve',
     'linearcurve',
-    'rectangle',
-    'cube',
     'sdfgrid',
     'shapegroup',
-    'instance'
+    'instance',
+    'ellipsoids',
+    'ellipsoidsmesh'
 ]
 
 BSDF_ORDERING = [
@@ -32,6 +33,7 @@ BSDF_ORDERING = [
     'roughdielectric',
     'conductor',
     'roughconductor',
+    'hair',
     'measured',
     'measured_polarized',
     'plastic',
@@ -53,8 +55,11 @@ EMITTER_ORDERING = [
     'point',
     'constant',
     'envmap',
+    'sunsky',
     'spot',
     'projector'
+    'directional',
+    'directionalarea',
 ]
 
 SENSOR_ORDERING = [
@@ -77,6 +82,7 @@ SPECTRUM_ORDERING = [
     'srgb',
     'd65',
     'blackbody'
+    'rawconstant'
 ]
 
 SAMPLER_ORDERING = [
@@ -95,9 +101,8 @@ INTEGRATOR_ORDERING = [
     'volpathmis',
     '../src/python/python/ad/integrators/prb.py',
     '../src/python/python/ad/integrators/prb_basic.py',
-    '../src/python/python/ad/integrators/direct_reparam.py',
-    '../src/python/python/ad/integrators/emission_reparam.py',
-    '../src/python/python/ad/integrators/prb_reparam.py',
+    '../src/python/python/ad/integrators/direct_projective.py',
+    '../src/python/python/ad/integrators/prb_projective.py',
     '../src/python/python/ad/integrators/prbvolpath.py',
 ]
 

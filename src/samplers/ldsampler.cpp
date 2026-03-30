@@ -86,13 +86,13 @@ public:
     void set_sample_count(uint32_t spp) override {
         // Make sure sample_count is power of two and square (e.g. 4, 16, 64, 256, 1024, ...)
         ScalarUInt32 res = 2;
-        while (dr::sqr(res) < spp)
+        while (dr::square(res) < spp)
             res = math::round_to_power_of_two(++res);
 
-        if (spp != dr::sqr(res))
-            Log(Warn, "Sample count should be square and power of two, rounding to %i", dr::sqr(res));
+        if (spp != dr::square(res))
+            Log(Warn, "Sample count should be square and power of two, rounding to %i", dr::square(res));
 
-        m_sample_count = dr::sqr(res);
+        m_sample_count = dr::square(res);
     }
 
     ref<Sampler<Float, Spectrum>> fork() override {
@@ -107,7 +107,7 @@ public:
         return new LowDiscrepancySampler (*this);
     }
 
-    void seed(uint32_t seed, uint32_t wavefront_size) override {
+    void seed(UInt32 seed, uint32_t wavefront_size) override {
         Base::seed(seed, wavefront_size);
         m_scramble_seed = compute_per_sequence_seed(seed);
     }
@@ -159,7 +159,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(LowDiscrepancySampler)
 
 private:
     LowDiscrepancySampler(const LowDiscrepancySampler &sampler) : Base(sampler) {
@@ -168,8 +168,40 @@ private:
 
     /// Per-sequence scramble seed
     UInt32 m_scramble_seed;
+
+public:
+    void
+    traverse_1_cb_ro(void *payload,
+                     drjit ::detail ::traverse_callback_ro fn) const override {
+        /**
+         * Traversing the field \c m_sample_index for loop state variables,
+         * causes the loop to be re-traced. This incurs significant overhead.
+         * Therefore we gate traversal of the sampler base class behind the
+         * \c JitFlag::EnableObjectTraversal, and otherwise handle
+         * \c m_dimension_index separately.
+         */
+        if (jit_flag(JitFlag::EnableObjectTraversal))
+            Base::traverse_1_cb_ro(payload, fn);
+        else
+            drjit::traverse_1_fn_ro(m_dimension_index, payload, fn);
+        drjit::traverse_1_fn_ro(m_scramble_seed, payload, fn);
+    }
+    void traverse_1_cb_rw(void *payload,
+                          drjit ::detail ::traverse_callback_rw fn) override {
+        /**
+         * Traversing the field \c m_sample_index for loop state variables,
+         * causes the loop to be re-traced. This incurs significant overhead.
+         * Therefore we gate traversal of the sampler base class behind the
+         * \c JitFlag::EnableObjectTraversal, and otherwise handle
+         * \c m_dimension_index separately.
+         */
+        if (jit_flag(JitFlag::EnableObjectTraversal))
+            Base::traverse_1_cb_rw(payload, fn);
+        else
+            drjit::traverse_1_fn_rw(m_dimension_index, payload, fn);
+        drjit::traverse_1_fn_rw(m_scramble_seed, payload, fn);
+    }
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(LowDiscrepancySampler , Sampler)
-MI_EXPORT_PLUGIN(LowDiscrepancySampler , "Low Discrepancy Sampler");
+MI_EXPORT_PLUGIN(LowDiscrepancySampler)
 NAMESPACE_END(mitsuba)

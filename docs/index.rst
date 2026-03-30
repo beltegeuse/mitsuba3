@@ -35,11 +35,16 @@ This command will also install :monosp:`Dr.Jit` on your system if not already av
 See the :ref:`developer guide <sec-compiling>` for complete instructions on building
 from the git source tree.
 
+When using the `Windows Subsystem for Linux 2 (WSL2)
+<https://learn.microsoft.com/en-us/windows/wsl/compare-versions#whats-new-in-wsl-2>`__,
+you must follow the :ref:`linked instructions <optix-wsl2>` to enable hardware-accelerated
+ray tracing on NVIDIA GPUs.
+
 Requirements
 ^^^^^^^^^^^^
 
-- ``Python >= 3.8``
-- (optional) For computation on the GPU: ``NVidia driver >= 495.89``
+- ``Python >= 3.9``
+- (optional) For computation on the GPU: ``Nvidia driver >= 535``
 - (optional) For vectorized / parallel computation on the CPU: ``LLVM >= 11.1``
 
 Hello World!
@@ -106,7 +111,7 @@ When using Mitsuba 3 in academic projects, please cite:
         title = {Mitsuba 3 renderer},
         author = {Wenzel Jakob and Sébastien Speierer and Nicolas Roussel and Merlin Nimier-David and Delio Vicini and Tizian Zeltner and Baptiste Nicolet and Miguel Crespo and Vincent Leroy and Ziyi Zhang},
         note = {https://mitsuba-renderer.org},
-        version = {3.0.1},
+        version = {3.8.0},
         year = 2022,
     }
 
@@ -149,5 +154,7 @@ When using Mitsuba 3 in academic projects, please cite:
     :hidden:
 
     src/gallery
+    src/optix_setup
+    porting_3_6
     release_notes
     zz_bibliography

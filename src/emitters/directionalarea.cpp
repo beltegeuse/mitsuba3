@@ -65,18 +65,17 @@ public:
                   "The area light inherits this transformation from its parent "
                   "shape.");
 
-        m_radiance = props.texture_d65<Texture>("radiance", 1.f);
+        m_radiance = props.get_emissive_texture<Texture>("radiance", 1.f);
         m_needs_sample_3 = false;
 
         m_flags = EmitterFlags::Surface | EmitterFlags::DeltaDirection;
         if (m_radiance->is_spatially_varying())
             m_flags |= +EmitterFlags::SpatiallyVarying;
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        Base::traverse(callback);
-        callback->put_object("radiance", m_radiance.get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        Base::traverse(cb);
+        cb->put("radiance", m_radiance, ParamFlags::Differentiable);
     }
 
     void set_shape(Shape *shape) override {
@@ -89,6 +88,15 @@ public:
                                           const Point2f &sample2,
                                           const Point2f & /*sample3*/,
                                           Mask active) const override {
+        if constexpr (drjit::is_jit_v<Float>) {
+            if (!m_shape)
+                return { dr::zeros<Ray3f>(), 0.f };
+        } else {
+            Assert(m_shape,
+                   "Cannot sample from a directionalarea emitter without an "
+                   "associated Shape.");
+        }
+
         // 1. Sample spatial component
         PositionSample3f ps = m_shape->sample_position(time, sample2);
 
@@ -129,7 +137,14 @@ public:
     std::pair<PositionSample3f, Float>
     sample_position(Float time, const Point2f &sample,
                     Mask active) const override {
-        Assert(m_shape, "Can't sample from an area emitter without an associated Shape.");
+        if constexpr (drjit::is_jit_v<Float>) {
+            if (!m_shape)
+                return { dr::zeros<PositionSample3f>(), 0.f };
+        } else {
+            Assert(m_shape, "Can't sample from a directionalarea emitter "
+                            "without an associated Shape.");
+        }
+
         PositionSample3f ps = m_shape->sample_position(time, sample, active);
         Float weight        = dr::select(ps.pdf > 0.f, dr::rcp(ps.pdf), 0.f);
         return { ps, weight };
@@ -171,12 +186,13 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(DirectionalArea)
 private:
     ref<Texture> m_radiance;
     Float m_area = 0.f;
+
+    MI_TRAVERSE_CB(Base, m_radiance, m_area)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(DirectionalArea, Emitter)
-MI_EXPORT_PLUGIN(DirectionalArea, "Directional area emitter");
+MI_EXPORT_PLUGIN(DirectionalArea)
 NAMESPACE_END(mitsuba)

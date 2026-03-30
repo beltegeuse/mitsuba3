@@ -19,24 +19,30 @@
 
 NAMESPACE_BEGIN(mitsuba)
 
-MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props) {
-    for (auto &[k, v] : props.objects()) {
-        Scene *scene           = dynamic_cast<Scene *>(v.get());
-        Shape *shape           = dynamic_cast<Shape *>(v.get());
+MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props)
+    : JitObject<Scene>(props.id()) {
+    m_thread_reordering = props.get<bool>("allow_thread_reordering", true);
+
+    for (auto &prop : props.objects()) {
+        ref<Object> v = prop.get<ref<Object>>();
+
         Mesh *mesh             = dynamic_cast<Mesh *>(v.get());
         Emitter *emitter       = dynamic_cast<Emitter *>(v.get());
         Sensor *sensor         = dynamic_cast<Sensor *>(v.get());
         Integrator *integrator = dynamic_cast<Integrator *>(v.get());
 
-        if (!scene)
+        if (Scene *scene = dynamic_cast<Scene *>(v.get())) {
+            // Skip nested scenes in children list
+        } else {
             m_children.push_back(v.get());
+        }
 
-        if (shape) {
+        if (Shape *shape = dynamic_cast<Shape *>(v.get())) {
             if (shape->is_emitter())
                 m_emitters.push_back(shape->emitter());
             if (shape->is_sensor())
                 m_sensors.push_back(shape->sensor());
-            if (shape->is_shapegroup()) {
+            if (shape->is_shape_group()) {
                 m_shapegroups.push_back((ShapeGroup*)shape);
             } else {
                 m_bbox.expand(shape->bbox());
@@ -67,6 +73,18 @@ MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props) {
     for (Sensor *sensor: m_sensors)
         sensor->set_scene(this);
 
+    // Mark backend-specific properties as queried
+    props.mark_queried("embree_use_robust_intersections");
+    props.mark_queried("kd_intersection_cost");
+    props.mark_queried("kd_traversal_cost");
+    props.mark_queried("kd_empty_space_bonus");
+    props.mark_queried("kd_stop_prims");
+    props.mark_queried("kd_max_depth");
+    props.mark_queried("kd_min_max_bins");
+    props.mark_queried("kd_clip");
+    props.mark_queried("kd_retract_bad_splits");
+    props.mark_queried("kd_exact_primitive_threshold");
+
     if constexpr (dr::is_cuda_v<Float>)
         accel_init_gpu(props);
     else
@@ -90,6 +108,7 @@ MI_VARIANT Scene<Float, Spectrum>::Scene(const Properties &props) {
     dr::eval(m_emitters_dr, m_shapes_dr, m_sensors_dr);
 
     update_emitter_sampling_distribution();
+    update_silhouette_sampling_distribution();
 
     m_shapes_grad_enabled = false;
 }
@@ -114,10 +133,44 @@ void Scene<Float, Spectrum>::update_emitter_sampling_distribution() {
     } else {
         // By default use uniform sampling with constant PMF
         m_emitter_pmf = m_emitters.empty() ? 0.f : (1.f / n_emitters);
+        m_emitter_distr = nullptr;
     }
     // Clear emitter's dirty flag
     for (auto &e : m_emitters)
         e->set_dirty(false);
+}
+
+MI_VARIANT
+void Scene<Float, Spectrum>::update_silhouette_sampling_distribution() {
+    size_t n_shapes = m_shapes.size();
+    std::vector<ScalarFloat> shape_weights{};
+    m_silhouette_shapes.clear();
+
+    for (size_t i = 0; i < n_shapes; ++i) {
+        ScalarFloat weight = m_shapes[i]->silhouette_sampling_weight();
+        // Only consider shapes that are being differentiated
+        bool grad_enabled = m_shapes[i]->parameters_grad_enabled();
+
+        if (grad_enabled && (weight > 0.f)) {
+            uint32_t types = m_shapes[i]->silhouette_discontinuity_types();
+
+            bool has_interior = has_flag(types, DiscontinuityFlags::InteriorType);
+            bool has_perimeter = has_flag(types, DiscontinuityFlags::PerimeterType);
+            bool has_discontinuity = has_interior || has_perimeter;
+
+            if (has_discontinuity) {
+                m_silhouette_shapes.emplace_back(m_shapes[i]);
+                shape_weights.emplace_back(weight);
+            }
+        }
+    }
+
+    size_t silhouette_shape_count = m_silhouette_shapes.size();
+    m_silhouette_shapes_dr = dr::load<DynamicBuffer<ShapePtr>>(
+        m_silhouette_shapes.data(), silhouette_shape_count);
+    if (silhouette_shape_count > 0u)
+        m_silhouette_distr = std::make_unique<DiscreteDistribution<Float>>(
+            shape_weights.data(), silhouette_shape_count);
 }
 
 MI_VARIANT Scene<Float, Spectrum>::~Scene() {
@@ -134,31 +187,41 @@ MI_VARIANT Scene<Float, Spectrum>::~Scene() {
     m_children.clear();
     m_integrator = nullptr;
     m_environment = nullptr;
-
-    if constexpr (dr::is_jit_v<Float>) {
-        // Clean up JIT pointer registry now that the above has happened
-        jit_registry_trim();
-    }
 }
 
 // -----------------------------------------------------------------------
 
 MI_VARIANT typename Scene<Float, Spectrum>::SurfaceInteraction3f
-Scene<Float, Spectrum>::ray_intersect(const Ray3f &ray, uint32_t ray_flags, Mask coherent, Mask active) const {
+Scene<Float, Spectrum>::ray_intersect(const Ray3f &ray, uint32_t ray_flags,
+                                      Mask coherent, bool reorder,
+                                      UInt32 reorder_hint,
+                                      uint32_t reorder_hint_bits,
+                                      Mask active) const {
     MI_MASKED_FUNCTION(ProfilerPhase::RayIntersect, active);
     DRJIT_MARK_USED(coherent);
+    DRJIT_MARK_USED(reorder);
+    DRJIT_MARK_USED(reorder_hint);
+    DRJIT_MARK_USED(reorder_hint_bits);
 
     if constexpr (dr::is_cuda_v<Float>)
-        return ray_intersect_gpu(ray, ray_flags, active);
+        return ray_intersect_gpu(ray, ray_flags, reorder, reorder_hint, reorder_hint_bits, active);
     else
         return ray_intersect_cpu(ray, ray_flags, coherent, active);
 }
 
 MI_VARIANT typename Scene<Float, Spectrum>::PreliminaryIntersection3f
-Scene<Float, Spectrum>::ray_intersect_preliminary(const Ray3f &ray, Mask coherent, Mask active) const {
+Scene<Float, Spectrum>::ray_intersect_preliminary(const Ray3f &ray,
+                                                  Mask coherent, bool reorder,
+                                                  UInt32 reorder_hint,
+                                                  uint32_t reorder_hint_bits,
+                                                  Mask active) const {
     DRJIT_MARK_USED(coherent);
+    DRJIT_MARK_USED(reorder);
+    DRJIT_MARK_USED(reorder_hint);
+    DRJIT_MARK_USED(reorder_hint_bits);
+
     if constexpr (dr::is_cuda_v<Float>)
-        return ray_intersect_preliminary_gpu(ray, active);
+        return ray_intersect_preliminary_gpu(ray, reorder, reorder_hint, reorder_hint_bits, active);
     else
         return ray_intersect_preliminary_cpu(ray, coherent, active);
 }
@@ -230,18 +293,13 @@ Scene<Float, Spectrum>::sample_emitter_ray(Float time, Float sample1,
                                            Mask active) const {
     MI_MASKED_FUNCTION(ProfilerPhase::SampleEmitterRay, active);
 
-
     Ray3f ray;
     Spectrum weight;
-    EmitterPtr emitter;
+    EmitterPtr emitter{};
 
-    // Potentially disable inlining of emitter sampling (if there is just a single emitter)
-    bool vcall_inline = true;
-    if constexpr (dr::is_jit_v<Float>)
-         vcall_inline = jit_flag(JitFlag::VCallInline);
-
+    // Don't inline emitter sampling in JIT variants(if there is just a single emitter)
     size_t emitter_count = m_emitters.size();
-    if (emitter_count > 1 || (emitter_count == 1 && !vcall_inline)) {
+    if (emitter_count > 1 || (emitter_count == 1 && drjit::is_jit_v<Float>)) {
         auto [index, emitter_weight, sample_1_re] = sample_emitter(sample1, active);
         emitter = dr::gather<EmitterPtr>(m_emitters_dr, index, active);
 
@@ -252,6 +310,7 @@ Scene<Float, Spectrum>::sample_emitter_ray(Float time, Float sample1,
     } else if (emitter_count == 1) {
         std::tie(ray, weight) =
             m_emitters[0]->sample_ray(time, sample1, sample2, sample3, active);
+        emitter = m_emitters[0].get();
     } else {
         ray = dr::zeros<Ray3f>();
         weight = dr::zeros<Spectrum>();
@@ -270,13 +329,9 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
     DirectionSample3f ds;
     Spectrum spec;
 
-    // Potentially disable inlining of emitter sampling (if there is just a single emitter)
-    bool vcall_inline = true;
-    if constexpr (dr::is_jit_v<Float>)
-         vcall_inline = jit_flag(JitFlag::VCallInline);
-
+    // Don't inline emitter sampling in JIT variants(if there is just a single emitter)
     size_t emitter_count = m_emitters.size();
-    if (emitter_count > 1 || (emitter_count == 1 && !vcall_inline)) {
+    if (emitter_count > 1 || (emitter_count == 1 && drjit::is_jit_v<Float>)) {
         // Randomly pick an emitter
         auto [index, emitter_weight, sample_x_re] = sample_emitter(sample.x(), active);
         sample.x() = sample_x_re;
@@ -289,7 +344,7 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
         ds.pdf *= pdf_emitter(index, active);
         spec *= emitter_weight;
 
-        active &= dr::neq(ds.pdf, 0.f);
+        active &= (ds.pdf != 0.f);
 
         // Mark occluded samples as invalid if requested by the user
         if (test_visibility && dr::any_or<true>(active)) {
@@ -301,7 +356,7 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
         // Sample a direction towards the (single) emitter
         std::tie(ds, spec) = m_emitters[0]->sample_direction(ref, sample, active);
 
-        active &= dr::neq(ds.pdf, 0.f);
+        active &= (ds.pdf != 0.f);
 
         // Mark occluded samples as invalid if requested by the user
         if (test_visibility && dr::any_or<true>(active)) {
@@ -315,6 +370,16 @@ Scene<Float, Spectrum>::sample_emitter_direction(const Interaction3f &ref, const
     }
 
     return { ds, spec };
+}
+
+
+MI_VARIANT uint32_t Scene<Float, Spectrum>::shape_types() const {
+    uint32_t result = 0;
+    for (const Shape *shape : m_shapes)
+        result |= (uint32_t) shape->shape_type();
+    for (const ShapeGroup *group : m_shapegroups)
+        result |= group->shape_types();
+    return result;
 }
 
 MI_VARIANT Float
@@ -336,12 +401,123 @@ MI_VARIANT Spectrum Scene<Float, Spectrum>::eval_emitter_direction(
     return ds.emitter->eval_direction(ref, ds, active);
 }
 
-MI_VARIANT void Scene<Float, Spectrum>::traverse(TraversalCallback *callback) {
+MI_VARIANT typename Scene<Float, Spectrum>::SilhouetteSample3f
+Scene<Float, Spectrum>::sample_silhouette(const Point3f &sample_,
+                                          uint32_t flags, Mask active) const {
+    MI_MASK_ARGUMENT(active);
+
+    if (unlikely(!m_silhouette_distr|| m_silhouette_shapes.size() == 0))
+        return dr::zeros<SilhouetteSample3f>();
+
+    // Sample a shape
+    UInt32 shape_idx;
+    Float reused_sample_x,
+          shape_weight;
+    std::tie(shape_idx, reused_sample_x, shape_weight) =
+        m_silhouette_distr->sample_reuse_pmf(sample_.x(), active);
+    ShapePtr shape =
+        dr::gather<ShapePtr>(m_silhouette_shapes_dr, shape_idx, active);
+
+    bool has_interior = has_flag(flags, DiscontinuityFlags::InteriorType);
+    bool has_perimeter = has_flag(flags, DiscontinuityFlags::PerimeterType);
+    Point3f sample(sample_);
+    sample.x() = reused_sample_x;
+
+    // Map a boundary sample space to a boundary segment in the scene space
+    SilhouetteSample3f ss = dr::zeros<SilhouetteSample3f>();
+    if (has_interior != has_perimeter) { // Only one discontinuity type
+        ss = shape->sample_silhouette(sample, flags, active);
+    } else {
+        UInt32 shape_sil_types = shape->silhouette_discontinuity_types();
+        Mask only_interior =
+            active &&
+            has_flag(shape_sil_types, DiscontinuityFlags::InteriorType) &&
+            !has_flag(shape_sil_types, DiscontinuityFlags::PerimeterType);
+        Mask only_perimeter =
+            active &&
+            !has_flag(shape_sil_types, DiscontinuityFlags::InteriorType) &&
+            has_flag(shape_sil_types, DiscontinuityFlags::PerimeterType);
+        Mask both =
+            active &&
+            has_flag(shape_sil_types, DiscontinuityFlags::InteriorType) &&
+            has_flag(shape_sil_types, DiscontinuityFlags::PerimeterType);
+
+        // If shapes have both types, weight them equally
+        Mask interior  = only_interior  || (both && (sample.x() <  0.5f));
+        Mask perimeter = only_perimeter || (both && (sample.x() >= 0.5f));
+        dr::masked(sample.x(), interior && both)  = sample.x() * 2.f;
+        dr::masked(sample.x(), perimeter && both) = sample.x() * 2.f - 1.f;
+
+        uint32_t other_flags = flags & ~DiscontinuityFlags::AllTypes;
+        SilhouetteSample3f ss_interior = shape->sample_silhouette(
+            sample, (uint32_t) DiscontinuityFlags::InteriorType | other_flags,
+            interior);
+        SilhouetteSample3f ss_perimeter = shape->sample_silhouette(
+            sample, (uint32_t) DiscontinuityFlags::PerimeterType | other_flags,
+            perimeter);
+
+        ss = dr::select(interior, ss_interior, ss_perimeter);
+        dr::masked(ss.pdf, both) *= 0.5f;
+    }
+
+    ss.pdf *= shape_weight;
+    ss.scene_index = shape_idx;
+
+    /* This is an escape hatch for any failed sample. Ideally these cases should
+     * be resolved directly in each shape's `sample_silhouette`. Just in case,
+     * they are caught and ignored here. */
+    Mask to_ignore =
+        (dr::isnan(ss.p.x()) || dr::isnan(ss.p.y()) || dr::isnan(ss.p.z()) ||
+         dr::isnan(ss.d.x()) || dr::isnan(ss.d.y()) || dr::isnan(ss.d.z()) ||
+         dr::isnan(ss.n.x()) || dr::isnan(ss.n.y()) || dr::isnan(ss.n.z()));
+    dr::masked(ss, to_ignore) = dr::zeros<SilhouetteSample3f>();
+
+    return ss;
+}
+
+MI_VARIANT typename Scene<Float, Spectrum>::Point3f
+Scene<Float, Spectrum>::invert_silhouette_sample(const SilhouetteSample3f &ss,
+                                                 Mask active) const {
+    MI_MASK_ARGUMENT(active);
+
+    Point3f sample = ss.shape->invert_silhouette_sample(ss, active);
+
+    // Inverse mapping of samples on shapes that have both types
+    Mask both_types_sampled =
+        ss.flags == (uint32_t) DiscontinuityFlags::AllTypes;
+    Mask shape_has_both_types =
+        ss.shape->silhouette_discontinuity_types() == (uint32_t) DiscontinuityFlags::AllTypes;
+    Mask is_interior =
+        has_flag(ss.discontinuity_type, DiscontinuityFlags::InteriorType);
+    dr::masked(sample.x(), both_types_sampled && shape_has_both_types) =
+        dr::select(is_interior,
+                   sample.x() * 0.5f,
+                   sample.x() * 0.5f + 0.5f);
+
+    if (m_silhouette_shapes.size() == 1)
+        return sample;
+
+    // Inverse mapping of samples w.r.t. scene
+    Float cdf = m_silhouette_distr->eval_cdf_normalized(ss.scene_index, active);
+    Float normalization = m_silhouette_distr->normalization();
+    Float weight = ss.shape->silhouette_sampling_weight();
+    Float offset = cdf - weight * normalization;
+    sample.x() = sample.x() * weight * normalization + offset;
+
+    return sample;
+}
+
+MI_VARIANT void Scene<Float, Spectrum>::traverse(TraversalCallback *cb) {
+    cb->put("allow_thread_reordering", m_thread_reordering, ParamFlags::NonDifferentiable);
     for (auto& child : m_children) {
-        std::string id = child->id();
-        if (id.empty() || string::starts_with(id, "_unnamed_"))
-            id = child->class_()->name();
-        callback->put_object(id, child.get(), +ParamFlags::Differentiable);
+        std::string_view id = child->id();
+        if (id.empty() || string::starts_with(id, "_unnamed_")) {
+            // Use a generic identifier based on object type
+            std::string generic_id = "object_" + std::to_string(reinterpret_cast<uintptr_t>(child.get()));
+            cb->put(generic_id, child, ParamFlags::Differentiable);
+        } else {
+            cb->put(id, child, ParamFlags::Differentiable);
+        }
     }
 }
 
@@ -369,14 +545,20 @@ MI_VARIANT void Scene<Float, Spectrum>::parameters_changed(const std::vector<std
             accel_parameters_changed_gpu();
         else
             accel_parameters_changed_cpu();
+
+        m_bbox = {};
+        for (auto &s : m_shapes)
+            m_bbox.expand(s->bbox());
     }
 
     // Check whether any shape parameters have gradient tracking enabled
     m_shapes_grad_enabled = false;
     for (auto &s : m_shapes) {
         m_shapes_grad_enabled |= s->parameters_grad_enabled();
-        if (m_shapes_grad_enabled)
+        if (m_shapes_grad_enabled) {
+            update_silhouette_sampling_distribution();
             break;
+        }
     }
 
     // Check if emitters were modified and we potentially need to update
@@ -441,11 +623,11 @@ MI_VARIANT void Scene<Float, Spectrum>::accel_release_gpu() {
     NotImplementedError("accel_release_gpu");
 }
 MI_VARIANT typename Scene<Float, Spectrum>::PreliminaryIntersection3f
-Scene<Float, Spectrum>::ray_intersect_preliminary_gpu(const Ray3f &, Mask) const {
+Scene<Float, Spectrum>::ray_intersect_preliminary_gpu(const Ray3f &, bool, UInt32, uint32_t, Mask) const {
     NotImplementedError("ray_intersect_preliminary_gpu");
 }
 MI_VARIANT typename Scene<Float, Spectrum>::SurfaceInteraction3f
-Scene<Float, Spectrum>::ray_intersect_gpu(const Ray3f &, uint32_t, Mask) const {
+Scene<Float, Spectrum>::ray_intersect_gpu(const Ray3f &, uint32_t, bool, UInt32, uint32_t, Mask) const {
     NotImplementedError("ray_intersect_naive_gpu");
 }
 MI_VARIANT typename Scene<Float, Spectrum>::Mask
@@ -456,6 +638,48 @@ MI_VARIANT void Scene<Float, Spectrum>::static_accel_initialization_gpu() { }
 MI_VARIANT void Scene<Float, Spectrum>::static_accel_shutdown_gpu() { }
 #endif
 
-MI_IMPLEMENT_CLASS_VARIANT(Scene, Object, "scene")
+MI_VARIANT
+void Scene<Float, Spectrum>::traverse_1_cb_ro(
+    void *payload, drjit::detail::traverse_callback_ro fn) const {
+
+    // Only traverse the scene for frozen functions, since accidentally
+    // traversing the scene in loops or vcalls can cause errors with variable
+    // size mismatches, and backpropagation of gradients.
+    if (!jit_flag(JitFlag::EnableObjectTraversal))
+    return;
+
+    if constexpr (!std::is_same_v<Object, drjit::TraversableBase>)
+        Object::traverse_1_cb_ro(payload, fn);
+    drjit::traverse_1(this->traverse_1_cb_fields_(), [payload, fn](auto &x) {
+        drjit::traverse_1_fn_ro(x, payload, fn);
+    });
+    if constexpr (dr::is_cuda_v<Float>) {
+        // Nothing to traverse for now
+    } else {
+        traverse_1_cb_ro_cpu(payload, fn);
+    }
+}
+
+MI_VARIANT
+void Scene<Float, Spectrum>::traverse_1_cb_rw(
+    void *payload, drjit::detail::traverse_callback_rw fn) {
+
+    // Only traverse the scene for frozen functions, since accidentally
+    // traversing the scene in loops or vcalls can cause errors with variable
+    // size mismatches, and backpropagation of gradients.
+    if (!jit_flag(JitFlag::EnableObjectTraversal))
+        return;
+
+    if constexpr (!std::is_same_v<Object, drjit::TraversableBase>)
+        Object::traverse_1_cb_rw(payload, fn);
+    drjit::traverse_1(this->traverse_1_cb_fields_(), [payload, fn](auto &x) {
+        drjit::traverse_1_fn_rw(x, payload, fn);
+    });
+    if constexpr (dr::is_cuda_v<Float>) {
+        // Nothing to traverse for now
+    } else {
+        traverse_1_cb_rw_cpu(payload, fn);
+    }
+}
 MI_INSTANTIATE_CLASS(Scene)
 NAMESPACE_END(mitsuba)

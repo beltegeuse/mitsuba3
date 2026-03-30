@@ -1,8 +1,15 @@
 import pytest
 import drjit as dr
 import mitsuba as mi
+import numpy as np
 
 from itertools import product
+
+# Special case to support both NumPy 1.x and >= 2.4.
+if hasattr(np, 'trapezoid'):
+    trapezoid = np.trapezoid
+else:
+    trapezoid = np.trapz
 
 
 def test_create(variant_scalar_rgb):
@@ -16,12 +23,11 @@ def test_eval(variant_scalar_rgb):
     We make sure that the values we use to initialize the plugin are such that
     the phase function has an asymmetric lobe.
     """
-    import numpy as np
 
     # Phase function table definition
     ref_y = np.array([0.5, 1.0, 1.5])
     ref_x = np.linspace(-1, 1, len(ref_y))
-    ref_integral = np.trapz(ref_y, ref_x)
+    ref_integral = trapezoid(ref_y, ref_x)
 
     def eval(wi, wo):
         # Python implementation used as a reference
@@ -36,7 +42,7 @@ def test_eval(variant_scalar_rgb):
         cos_theta = np.array([np.dot(a, b) for a, b in zip(wi, wo)])
         return 0.5 / np.pi * np.interp(-cos_theta, ref_x, ref_y) / ref_integral
 
-    wi = np.array([[0, 0, -1]])
+    wi = np.array([0, 0, -1])
     thetas = np.linspace(0, np.pi / 2, 16)
     phis = np.linspace(0, np.pi, 16)
     wos = np.array(
@@ -53,7 +59,7 @@ def test_eval(variant_scalar_rgb):
 
     # Evaluate Mitsuba implementation
     tab = mi.load_dict({"type": "tabphase", "values": ", ".join([str(x) for x in ref_y])})
-    ctx = mi.PhaseFunctionContext(None)
+    ctx = mi.PhaseFunctionContext()
     mei = mi.MediumInteraction3f()
     mei.wi = wi
     tab_eval = np.zeros_like(ref_eval)
@@ -71,7 +77,7 @@ def test_sample(variant_scalar_rgb):
     """
 
     tab = mi.load_dict({"type": "tabphase", "values": "0.0, 0.5, 1.0"})
-    ctx = mi.PhaseFunctionContext(None)
+    ctx = mi.PhaseFunctionContext()
     mei = mi.MediumInteraction3f()
     mei.t = 0.1
     mei.p = [0, 0, 0]
@@ -111,11 +117,10 @@ def test_chi2(variants_vec_backends_once_rgb):
 
 def test_traverse(variant_scalar_rgb):
     # Phase function table definition
-    import numpy as np
 
     ref_y = np.array([0.5, 1.0, 1.5])
     ref_x = np.linspace(-1, 1, len(ref_y))
-    ref_integral = np.trapz(ref_y, ref_x)
+    ref_integral = trapezoid(ref_y, ref_x)
 
     # Initialise as isotropic and update with parameters
     phase = mi.load_dict({"type": "tabphase", "values": "1, 1, 1"})
@@ -128,7 +133,7 @@ def test_traverse(variant_scalar_rgb):
     assert dr.allclose(params["values"], [0.5, 1.0, 1.5])
 
     # The plugin itself evaluates consistently
-    ctx = mi.PhaseFunctionContext(None)
+    ctx = mi.PhaseFunctionContext()
     mei = mi.MediumInteraction3f()
     mei.wi = np.array([0, 0, -1])
     wo = [0, 0, 1]

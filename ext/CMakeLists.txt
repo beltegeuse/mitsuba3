@@ -33,6 +33,11 @@ if (MI_PROFILER_NVTX)
 endif()
 
 if (NOT SKBUILD)
+  if (MSVC)
+    set(DRJIT_PYTHON_DST_DIR "${MI_BINARY_DIR}/python/drjit")
+  else()
+    set(DRJIT_PYTHON_DST_DIR "${CMAKE_CURRENT_BINARY_DIR}/../python/drjit")
+  endif()
   add_subdirectory(drjit)
 
   if (NOT MI_ENABLE_JIT)
@@ -47,16 +52,7 @@ if (NOT SKBUILD)
   endif()
 
   if (MI_ENABLE_AUTODIFF)
-    set_target_properties(drjit-autodiff PROPERTIES FOLDER "drjit")
-    if (TARGET drjit-autodiff-scalar-f32)
-      set_target_properties(drjit-autodiff-scalar-f32 drjit-autodiff-scalar-f64 PROPERTIES FOLDER "drjit")
-    endif()
-    if (TARGET drjit-autodiff-cuda-f32)
-      set_target_properties(drjit-autodiff-cuda-f32 drjit-autodiff-cuda-f64 PROPERTIES FOLDER "drjit")
-    endif()
-    if (TARGET drjit-autodiff-llvm-f32)
-      set_target_properties(drjit-autodiff-llvm-f32 drjit-autodiff-llvm-f64 PROPERTIES FOLDER "drjit")
-    endif()
+    set_target_properties(drjit-extra PROPERTIES FOLDER "drjit")
   endif()
 
   if (MI_ENABLE_PYTHON)
@@ -80,13 +76,14 @@ if (MI_ENABLE_EMBREE)
 
   set(EMBREE_ISPC_SUPPORT              OFF CACHE BOOL " " FORCE)
   set(EMBREE_TUTORIALS                 OFF CACHE BOOL " " FORCE)
-  set(EMBREE_FILTER_FUNCTION           OFF CACHE BOOL " " FORCE)
+  set(EMBREE_FILTER_FUNCTION           ON CACHE BOOL " " FORCE)
   set(EMBREE_IGNORE_CMAKE_CXX_FLAGS    OFF CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_QUAD             OFF CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_GRID             OFF CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_POINT            OFF CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_SUBDIVISION      OFF CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_CURVE            ON  CACHE BOOL " " FORCE)
+  set(EMBREE_BACKFACE_CULLING_CURVES   ON  CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_INSTANCE         ON  CACHE BOOL " " FORCE)
   set(EMBREE_GEOMETRY_USER             ON  CACHE BOOL " " FORCE)
   set(EMBREE_IGNORE_INVALID_RAYS       ON  CACHE BOOL " " FORCE)
@@ -96,14 +93,20 @@ if (MI_ENABLE_EMBREE)
   set(EMBREE_MAX_INSTANCE_LEVEL_COUNT  1 CACHE STRING " " FORCE)
   set(EMBREE_TASKING_SYSTEM            "INTERNAL" CACHE STRING " " FORCE)
   set(EMBREE_ISA_SSE2                  OFF CACHE BOOL " " FORCE)
+  set(EMBREE_API_NAMESPACE             "mitsuba" CACHE STRING " " FORCE)
 
-  if (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+  if ((CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64") OR (CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64"))
+    set(EMBREE_ISA_SSE42            OFF CACHE BOOL " " FORCE)
     set(EMBREE_ISA_SSE42            OFF CACHE BOOL " " FORCE)
     set(EMBREE_ISA_AVX              OFF CACHE BOOL " " FORCE)
     set(EMBREE_ISA_AVX2             OFF CACHE BOOL " " FORCE)
     set(EMBREE_ISA_AVX512           OFF CACHE BOOL " " FORCE)
     set(EMBREE_ISA_NEON             ON CACHE BOOL " " FORCE)
-    set(EMBREE_ISA_NEON2X           ON CACHE BOOL " " FORCE)
+    if (APPLE)
+      set(EMBREE_ISA_NEON2X           ON CACHE BOOL " " FORCE)
+    else()
+      set(EMBREE_ISA_NEON2X           OFF CACHE BOOL " " FORCE)
+    endif()
   else()
     set(EMBREE_ISA_SSE42            ON CACHE BOOL " " FORCE)
     set(EMBREE_ISA_AVX              ON CACHE BOOL " " FORCE)
@@ -171,8 +174,20 @@ if (WIN32)
       ${CMAKE_CURRENT_BINARY_DIR}/zlib
       CACHE BOOL " " FORCE)
 
+  # libpng expects zlib to be a modern CMake package, let's make an alias for it
+  add_library(ZLIB::ZLIB ALIAS zlib)
+  target_include_directories(zlib PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/zlib>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/zlib>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/zlib>
+  )
+
   mark_as_advanced(ZLIB_BUILD_AMD64 ZLIB_BUILD_ASM686 ZLIB_BUILD_EXAMPLES
     ZLIB_BUILD_SHARED_LIBS ZLIB_BUILD_STATIC_LIBS)
+endif()
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "GNU")
+  add_compile_options(-Wno-unused-parameter -Wno-unused-but-set-variable -Wno-sign-compare)
 endif()
 
 # Prevents openexr to set the DEBUG_POSTFIX "_d"
@@ -191,6 +206,13 @@ unset(CMAKE_CXX_VISIBILITY_PRESET)
 add_subdirectory(openexr)
 set(CMAKE_CXX_VISIBILITY_PRESET "hidden")
 
+if (MSVC)
+  target_compile_options(Half PRIVATE /W2)
+  target_compile_options(IlmThread PRIVATE /W2)
+  target_compile_options(Imath PRIVATE /W2)
+  target_compile_options(IlmImf PRIVATE /W1)
+endif()
+
 set_property(TARGET
   IexMath IlmThread Half Iex Imath IlmImf IexMath IlmImfUtil
   PROPERTY FOLDER "dependencies/openexr")
@@ -198,6 +220,10 @@ set_property(TARGET
 set_property(TARGET
   IexMath IlmThread Half Iex Imath IlmImf IexMath
   PROPERTY PUBLIC_HEADER "")
+
+foreach(X IexMath IlmThread Half Iex Imath IlmImf IexMath IlmImfUtil)
+  set_property(TARGET ${X} PROPERTY OUTPUT_NAME "${X}-mitsuba")
+endforeach()
 
 set(OPENEXR_INCLUDE_DIRS
   ${CMAKE_CURRENT_SOURCE_DIR}/openexr/IlmBase/Imath
@@ -240,7 +266,7 @@ if (CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
 set(PNG_ARM_NEON "on" CACHE STRING " " FORCE)
 endif()
 add_subdirectory(libpng)
-set_property(TARGET png genfiles PROPERTY FOLDER "dependencies")
+set_property(TARGET png png_genfiles PROPERTY FOLDER "dependencies")
 set_property(TARGET png PROPERTY OUTPUT_NAME "png-mitsuba")
 
 set(PNG_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/libpng;${CMAKE_CURRENT_BINARY_DIR}/libpng" PARENT_SCOPE)
@@ -249,7 +275,8 @@ set(PNG_DEFINES      -DMI_HAS_LIBPNG PARENT_SCOPE)
 
 mark_as_advanced(DFA_XTRA AWK PNG_FRAMEWORK PNG_HARDWARE_OPTIMIZATIONS
   PNG_PREFIX PNG_SHARED PNG_STATIC PNG_TESTS PNG_BUILD_ZLIB PNG_DEBUG
-  PNG_INTEL_SSE M_LIBRARY ld-version-script)
+  PNG_INTEL_SSE M_LIBRARY ld-version-script PNG_EXECUTABLES PNG_LIBCONF_HEADER
+  PNG_TOOLS)
 
 # ----------------------------------------------------------
 #  libjpeg 7
@@ -284,6 +311,7 @@ set_property(TARGET pugixml PROPERTY
 set_property(TARGET pugixml PROPERTY FOLDER "dependencies")
 set(PUGIXML_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/pugixml/src PARENT_SCOPE)
 target_compile_options(pugixml PRIVATE -DPUGIXML_BUILD_DLL)
+target_compile_features(pugixml PUBLIC cxx_std_17)
 
 # tinyformat include path
 set(TINYFORMAT_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/tinyformat PARENT_SCOPE)
@@ -328,6 +356,10 @@ add_subdirectory(rgb2spec)
 set(RGB2SPEC_INCLUDE_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/rgb2spec PARENT_SCOPE)
 set_target_properties(rgb2spec rgb2spec_opt rgb2spec_opt_run PROPERTIES FOLDER "dependencies/rgb2spec")
 
+if (MSVC)
+  target_compile_options(rgb2spec_opt PRIVATE "/wd4849" "/wd4456")
+endif()
+
 # ----------------------------------------------------------
 #  Fast floating point parser (interface library)
 # ----------------------------------------------------------
@@ -338,6 +370,12 @@ mark_as_advanced(
   FASTFLOAT_TEST
 )
 unset(CMAKE_CXX_STANDARD CACHE)
+
+# ----------------------------------------------------------
+#  Nanobind headers
+# ----------------------------------------------------------
+
+set(NANOBIND_INCLUDE_DIRS ${NB_DIR}/include PARENT_SCOPE)
 
 # ----------------------------------------------------------
 #  Hide a few more settings that aren't relevant for users

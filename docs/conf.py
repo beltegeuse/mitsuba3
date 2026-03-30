@@ -52,7 +52,7 @@ from pathlib import Path
 # -- General configuration ------------------------------------------------
 
 # If your documentation needs a minimal Sphinx version, state it here.
-needs_sphinx = '2.4'
+needs_sphinx = '8.1.3'
 
 
 # Add any paths that contain templates here, relative to this directory.
@@ -90,9 +90,10 @@ rst_prolog = r"""
 .. |nbsp| unicode:: 0xA0
    :trim:
 
-.. |exposed| replace:: :abbr:`P (This parameters will be exposed as a scene parameter)`
+.. |exposed| replace:: :abbr:`P (This parameter will be exposed as a scene parameter)`
+.. |readonly| replace:: :abbr:`R (This parameter will be exposed as a scene parameter, but cannot be modified.)`
 .. |differentiable| replace:: :abbr:`∂ (This parameter is differentiable)`
-.. |discontinuous| replace:: :abbr:`D (This parameter might introduce discontinuities. Therefore it requires special handling during differentiation to prevent bias (e.g. prb-reparam)))`
+.. |discontinuous| replace:: :abbr:`D (This parameter might introduce discontinuities. Therefore it requires special handling during differentiation to prevent bias))`
 
 """
 
@@ -184,6 +185,7 @@ html_js_files = []
 # Register the theme as an extension to generate a sitemap.xml
 extensions = []
 extensions.append("sphinx.ext.mathjax")
+extensions.append("sphinx.ext.intersphinx")
 extensions.append("sphinx_tabs.tabs")
 extensions.append("hoverxref.extension")
 
@@ -202,6 +204,15 @@ extensions.append('sphinxcontrib.youtube')
 extensions.append('sphinx_design')
 
 extensions.append('nbsphinx')
+
+intersphinx_mapping = { 
+    "python": ("https://docs.python.org/3", None),
+    "drjit" : (
+        "https://drjit.readthedocs.io/en/latest/", 
+        ("https://drjit.readthedocs.io/en/v0.4.6/", None)
+    )
+}
+
 nbsphinx_execute = 'never'
 
 # Inject javascript at the top of tutorial pages to add Download buttons
@@ -265,14 +276,13 @@ nbsphinx_prolog = """
             <button id="nb_btn">Download notebook</button>
         </a>
 
-        <a href="https://rgl.s3.eu-central-1.amazonaws.com/scenes/tutorials/scenes.zip" target="_blank">
+        <a href="https://d38rqfq1h7iukm.cloudfront.net/scenes/tutorials/scenes.zip" target="_blank">
             <button id="data_btn">Download data</button>
         </a>
     </div>
 
 """
 
-extensions.append('sphinx_gallery.load_style')
 nbsphinx_thumbnails = {
     'src/getting_started/quickstart/drjit_quickstart': '_static/drjit-logo-dark.png',
 }
@@ -532,6 +542,10 @@ def custom_step(app):
 
 
 def setup(app):
+    import sphinx
+    if sphinx.__version__ != "8.1.3":
+        raise Exception("Please run the documentation with the exact package "
+                        "versions provided in `docs/requirements.txt`!")
     # Texinfo
     app.connect("builder-inited", custom_step)
     app.add_css_file('theme_overrides.css')

@@ -161,23 +161,23 @@ public:
 
     PrincipledThin(const Properties &props) : Base(props) {
 
-        m_base_color = props.texture<Texture>("base_color", 0.5f);
-        m_roughness = props.texture<Texture>("roughness", 0.5f);
+        m_base_color = props.get_texture<Texture>("base_color", 0.5f);
+        m_roughness = props.get_texture<Texture>("roughness", 0.5f);
         m_has_anisotropic = get_flag("anisotropic", props);
-        m_anisotropic = props.texture<Texture>("anisotropic", 0.0f);
+        m_anisotropic = props.get_texture<Texture>("anisotropic", 0.0f);
         m_has_spec_trans = get_flag("spec_trans", props);
-        m_spec_trans = props.texture<Texture>("spec_trans", 0.0f);
+        m_spec_trans = props.get_texture<Texture>("spec_trans", 0.0f);
         m_has_sheen = get_flag("sheen", props);
-        m_sheen = props.texture<Texture>("sheen", 0.0f);
+        m_sheen = props.get_texture<Texture>("sheen", 0.0f);
         m_has_sheen_tint = get_flag("sheen_tint", props);
-        m_sheen_tint = props.texture<Texture>("sheen_tint", 0.0f);
+        m_sheen_tint = props.get_texture<Texture>("sheen_tint", 0.0f);
         m_has_flatness = get_flag("flatness", props);
-        m_flatness = props.texture<Texture>("flatness", 0.0f);
+        m_flatness = props.get_texture<Texture>("flatness", 0.0f);
         m_has_spec_tint = get_flag("spec_tint", props);
-        m_spec_tint = props.texture<Texture>("spec_tint", 0.0f);
-        m_eta_thin = props.texture<Texture>("eta", 1.5f);
+        m_spec_tint = props.get_texture<Texture>("spec_tint", 0.0f);
+        m_eta_thin = props.get_unbounded_texture<Texture>("eta", 1.5f);
         m_has_diff_trans = get_flag("diff_trans", props);
-        m_diff_trans = props.texture<Texture>("diff_trans", 0.0f);
+        m_diff_trans = props.get_texture<Texture>("diff_trans", 0.0f);
         m_spec_refl_srate =
                 props.get("specular_reflectance_sampling_rate", 1.0f);
         m_spec_trans_srate =
@@ -216,24 +216,23 @@ public:
 
         for (auto c : m_components)
             m_flags |= c;
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_object("eta",                                     m_eta_thin.get() , ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_object("roughness",                               m_roughness.get(), ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_object("diff_trans",                              m_diff_trans.get(),  +ParamFlags::Differentiable);
-        callback->put_parameter("specular_reflectance_sampling_rate",   m_spec_refl_srate,   +ParamFlags::NonDifferentiable);
-        callback->put_parameter("diffuse_reflectance_sampling_rate",    m_diff_refl_srate,   +ParamFlags::NonDifferentiable);
-        callback->put_parameter("diffuse_transmittance_sampling_rate",  m_diff_trans_srate,  +ParamFlags::NonDifferentiable);
-        callback->put_parameter("specular_transmittance_sampling_rate", m_spec_trans_srate,  +ParamFlags::NonDifferentiable);
-        callback->put_object("base_color",                              m_base_color.get(),  +ParamFlags::Differentiable);
-        callback->put_object("anisotropic",                             m_anisotropic.get(), +ParamFlags::Differentiable);
-        callback->put_object("spec_tint",                               m_spec_tint.get(),   +ParamFlags::Differentiable);
-        callback->put_object("sheen",                                   m_sheen.get(),       +ParamFlags::Differentiable);
-        callback->put_object("sheen_tint",                              m_sheen_tint.get(),  +ParamFlags::Differentiable);
-        callback->put_object("spec_trans",                              m_spec_trans.get(),  +ParamFlags::Differentiable);
-        callback->put_object("flatness",                                m_flatness.get(),    +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("eta",                                   m_eta_thin,         ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        cb->put("roughness",                             m_roughness,        ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        cb->put("diff_trans",                            m_diff_trans,       ParamFlags::Differentiable);
+        cb->put("specular_reflectance_sampling_rate",    m_spec_refl_srate,  ParamFlags::NonDifferentiable);
+        cb->put("diffuse_reflectance_sampling_rate",     m_diff_refl_srate,  ParamFlags::NonDifferentiable);
+        cb->put("diffuse_transmittance_sampling_rate",   m_diff_trans_srate, ParamFlags::NonDifferentiable);
+        cb->put("specular_transmittance_sampling_rate",  m_spec_trans_srate, ParamFlags::NonDifferentiable);
+        cb->put("base_color",                            m_base_color,       ParamFlags::Differentiable);
+        cb->put("anisotropic",                           m_anisotropic,      ParamFlags::Differentiable);
+        cb->put("spec_tint",                             m_spec_tint,        ParamFlags::Differentiable);
+        cb->put("sheen",                                 m_sheen,            ParamFlags::Differentiable);
+        cb->put("sheen_tint",                            m_sheen_tint,       ParamFlags::Differentiable);
+        cb->put("spec_trans",                            m_spec_trans,       ParamFlags::Differentiable);
+        cb->put("flatness",                              m_flatness,         ParamFlags::Differentiable);
     }
 
     void
@@ -267,7 +266,7 @@ public:
         BSDFSample3f bs   = dr::zeros<BSDFSample3f>();
 
         // Ignoring perfectly grazing incoming rays
-        active &= dr::neq(cos_theta_i, 0.0f);
+        active &= cos_theta_i != 0.0f;
 
         if (unlikely(dr::none_or<false>(active)))
             return { bs, 0.0f };
@@ -421,7 +420,7 @@ public:
 
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
         // Ignore perfectly grazing configurations
-        active &= dr::neq(cos_theta_i, 0.0f);
+        active &= cos_theta_i != 0.0f;
 
         if (unlikely(dr::none_or<false>(active)))
             return 0.0f;
@@ -536,7 +535,7 @@ public:
 
             // Retro response
             Float cos_theta_d = dr::dot(wh, wo_t);
-            Float Rr          = 2.0f * roughness * dr::sqr(cos_theta_d);
+            Float Rr          = 2.0f * roughness * dr::square(cos_theta_d);
             Float f_retro     = Rr * (Fo + Fi + Fo * Fi * (Rr - 1.0f));
 
             /* Fake subsurface implementation based on Hanrahan-Krueger
@@ -604,7 +603,7 @@ public:
 
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
         // Ignore perfectly grazing configurations.
-        active &= dr::neq(cos_theta_i, 0.0f);
+        active &= cos_theta_i != 0.0f;
 
         if (unlikely(dr::none_or<false>(active)))
             return 0.0f;
@@ -726,7 +725,7 @@ public:
 
         return oss.str();
     }
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(PrincipledThin)
 private:
     /// Parameters of the model
     ref<Texture> m_base_color;
@@ -754,8 +753,11 @@ private:
     bool m_has_sheen_tint;
     bool m_has_anisotropic;
     bool m_has_flatness;
+
+    MI_TRAVERSE_CB(Base, m_base_color, m_roughness, m_anisotropic, m_sheen,
+                   m_sheen_tint, m_spec_trans, m_flatness, m_spec_tint,
+                   m_diff_trans, m_eta_thin)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(PrincipledThin, BSDF)
-MI_EXPORT_PLUGIN(PrincipledThin, "The Principled Thin Material")
+MI_EXPORT_PLUGIN(PrincipledThin)
 NAMESPACE_END(mitsuba)

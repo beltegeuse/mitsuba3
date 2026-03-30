@@ -34,7 +34,7 @@ NAMESPACE_BEGIN(mitsuba)
  * implementations.
  */
 template <typename Float, typename Spectrum>
-class MI_EXPORT_LIB Integrator : public Object {
+class MI_EXPORT_LIB Integrator : public JitObject<Integrator<Float, Spectrum>> {
 public:
     MI_IMPORT_TYPES(Scene, Sensor)
 
@@ -73,7 +73,7 @@ public:
      */
     virtual TensorXf render(Scene *scene,
                             Sensor *sensor,
-                            uint32_t seed = 0,
+                            UInt32 seed = 0,
                             uint32_t spp = 0,
                             bool develop = true,
                             bool evaluate = true) = 0;
@@ -87,7 +87,7 @@ public:
      */
     TensorXf render(Scene *scene,
                     uint32_t sensor_index = 0,
-                    uint32_t seed = 0,
+                    UInt32 seed = 0,
                     uint32_t spp = 0,
                     bool develop = true,
                     bool evaluate = true);
@@ -118,7 +118,7 @@ public:
      * parameters, or the function will just return a zero-valued gradient image.
      * This is typically done by invoking ``dr.enable_grad()`` and
      * ``dr.set_grad()`` on elements of the ``SceneParameters`` data structure
-     * that can be obtained obtained via a call to ``mi.traverse()``.
+     * that can be obtained via a call to ``mi.traverse()``.
      *
      * Note the default implementation of this functionality relies on naive
      * automatic differentiation (AD), which records a computation graph of the
@@ -164,7 +164,7 @@ public:
     virtual TensorXf render_forward(Scene* scene,
                                     void* params,
                                     Sensor *sensor,
-                                    uint32_t seed = 0,
+                                    UInt32 seed = 0,
                                     uint32_t spp = 0);
 
     /**
@@ -177,17 +177,17 @@ public:
     TensorXf render_forward(Scene* scene,
                             void* params,
                             uint32_t sensor_index = 0,
-                            uint32_t seed = 0,
+                            UInt32 seed = 0,
                             uint32_t spp = 0) {
 
         if (sensor_index >= scene->sensors().size())
-            Throw("SamplingIntegrator::render_forward(): sensor index %i" 
+            Throw("SamplingIntegrator::render_forward(): sensor index %i"
                   "is out of bounds!", sensor_index);
 
         return render_forward(scene,
                               params,
                               scene->sensors()[sensor_index].get(),
-                              seed, 
+                              seed,
                               spp);
     }
 
@@ -196,7 +196,7 @@ public:
      *
      * Reverse-mode differentiation transforms image-space gradients into scene
      * parameter gradients, enabling simultaneous optimization of scenes with
-     * millions of free parameters. The function is invoked with an input
+     * millions of differentiable parameters. The function is invoked with an input
      * *gradient image* (``grad_in``) and transforms and accumulates these into
      * the gradient arrays of scene parameters that previously had gradient
      * tracking enabled.
@@ -204,7 +204,7 @@ public:
      * Before calling this function, you must first enable gradient tracking for
      * one or more scene parameters, or the function will not do anything. This is
      * typically done by invoking ``dr.enable_grad()`` on elements of the
-     * ``SceneParameters`` data structure that can be obtained obtained via a call
+     * ``SceneParameters`` data structure that can be obtained via a call
      * to ``mi.traverse()``. Use ``dr.grad()`` to query the resulting gradients of
      * these parameters once ``render_backward()`` returns.
      *
@@ -254,7 +254,7 @@ public:
                                  void* params,
                                  const TensorXf& grad_in,
                                  Sensor* sensor,
-                                 uint32_t seed = 0,
+                                 UInt32 seed = 0,
                                  uint32_t spp = 0);
 
     /**
@@ -268,18 +268,18 @@ public:
                          void* params,
                          const TensorXf& grad_in,
                          uint32_t sensor_index = 0,
-                         uint32_t seed = 0,
+                         UInt32 seed = 0,
                          uint32_t spp = 0) {
 
         if (sensor_index >= scene->sensors().size())
-            Throw("SamplingIntegrator::render_backward(): sensor index %i" 
+            Throw("SamplingIntegrator::render_backward(): sensor index %i"
                   "is out of bounds!", sensor_index);
 
         return render_backward(scene,
                                params,
                                grad_in,
                                scene->sensors()[sensor_index].get(),
-                               seed, 
+                               seed,
                                spp);
     }
 
@@ -309,13 +309,43 @@ public:
      */
     virtual std::vector<std::string> aov_names() const;
 
-    MI_DECLARE_CLASS()
+    /**
+     * \brief Traces a ray in the scene and returns the first intersection that
+     * is not an area emitter.
+     *
+     * This is a helper method for when the `hide_emitters` flag is set.
+     *
+     * \param scene
+     *    The scene that the ray will intersect.
+     *
+     * \param ray
+     *    The ray that determines the direction in which to trace new rays
+     *
+     * \param coherent
+     *    Setting this flag to \c true can noticeably improve performance when
+     *    \c ray contains a coherent set of rays (e.g. primary camera rays),
+     *    and when using <tt>llvm_*</tt> variants of the renderer along with
+     *    Embree. It has no effect in scalar or CUDA/OptiX variants.
+     *    (Default: False)
+     *
+     * \param active
+     *    A mask that indicates which lanes are active. Typically, this should
+     *    be set to ``True`` for any lane where the current depth is 0 (for
+     *    ``hide_emitters``). (Default: True)
+     *
+     * \return
+     *    The first intersection that is not an area emitter anlong the ``ray``.
+     */
+    PreliminaryIntersection3f skip_area_emitters(const Scene *scene,
+                                                 const Ray3f &ray,
+                                                 bool coherent = false,
+                                                 Mask active = true) const;
+
+    MI_DECLARE_PLUGIN_BASE_CLASS(Integrator)
+
 protected:
     /// Create an integrator
     Integrator(const Properties & props);
-
-    /// Virtual destructor
-    virtual ~Integrator() { }
 
 protected:
     /// Integrators should stop all work when this flag is set to true.
@@ -333,6 +363,11 @@ protected:
 
     /// Flag for disabling direct visibility of emitters
     bool m_hide_emitters;
+
+    /// Identifier (if available)
+    std::string m_id;
+
+    MI_TRAVERSE_CB(Object)
 };
 
 /** \brief Abstract integrator that performs Monte Carlo sampling starting from
@@ -351,6 +386,9 @@ public:
     MI_IMPORT_BASE(Integrator, should_stop, aov_names,
                     m_stop, m_timeout, m_render_timer, m_hide_emitters)
     MI_IMPORT_TYPES(Scene, Sensor, Film, ImageBlock, Medium, Sampler)
+
+    /// Destructor
+    ~SamplingIntegrator();
 
     /**
      * \brief Sample the incident radiance along a ray.
@@ -380,7 +418,7 @@ public:
      * \return
      *    A pair containing a spectrum and a mask specifying whether a surface
      *    or medium interaction was sampled. False mask entries indicate that
-     *    the ray "escaped" the scene, in which case the the returned spectrum
+     *    the ray "escaped" the scene, in which case the returned spectrum
      *    contains the contribution of environment maps, if present. The mask
      *    can be used to estimate a suitable alpha channel of a rendered image.
      *
@@ -404,7 +442,7 @@ public:
 
     TensorXf render(Scene *scene,
                     Sensor *sensor,
-                    uint32_t seed = 0,
+                    UInt32 seed = 0,
                     uint32_t spp = 0,
                     bool develop = true,
                     bool evaluate = true) override;
@@ -412,10 +450,9 @@ public:
     //! @}
     // =========================================================================
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(SamplingIntegrator)
 protected:
     SamplingIntegrator(const Properties &props);
-    virtual ~SamplingIntegrator();
 
     virtual void render_block(const Scene *scene,
                               const Sensor *sensor,
@@ -423,7 +460,7 @@ protected:
                               ImageBlock *block,
                               Float *aovs,
                               uint32_t sample_count,
-                              uint32_t seed,
+                              UInt32 seed,
                               uint32_t block_id,
                               uint32_t block_size) const;
 
@@ -448,6 +485,8 @@ protected:
      * If set to (uint32_t) -1, all the work is done in a single pass (default).
      */
     uint32_t m_samples_per_pass;
+
+    MI_TRAVERSE_CB(Base)
 };
 
 /** \brief Abstract integrator that performs *recursive* Monte Carlo sampling
@@ -464,17 +503,19 @@ class MI_EXPORT_LIB MonteCarloIntegrator
 public:
     MI_IMPORT_BASE(SamplingIntegrator)
 
+    /// Destructor
+    ~MonteCarloIntegrator();
+
 protected:
     /// Create an integrator
     MonteCarloIntegrator(const Properties &props);
 
-    /// Virtual destructor
-    virtual ~MonteCarloIntegrator();
-
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(MonteCarloIntegrator)
 protected:
     uint32_t m_max_depth;
     uint32_t m_rr_depth;
+
+    MI_TRAVERSE_CB(Base)
 };
 
 /** \brief Abstract adjoint integrator that performs Monte Carlo sampling
@@ -496,6 +537,9 @@ public:
                     m_render_timer, m_hide_emitters)
     MI_IMPORT_TYPES(Scene, Sensor, Film, BSDF, BSDFPtr, ImageBlock, Sampler,
                      EmitterPtr)
+
+    /// Destructor
+    ~AdjointIntegrator();
 
     /**
      * \brief Sample the incident importance and splat the product of
@@ -527,7 +571,7 @@ public:
 
     TensorXf render(Scene *scene,
                     Sensor *sensor,
-                    uint32_t seed = 0,
+                    UInt32 seed = 0,
                     uint32_t spp = 0,
                     bool develop = true,
                     bool evaluate = true) override;
@@ -535,14 +579,11 @@ public:
     //! @}
     // =========================================================================
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(AdjointIntegrator)
 
 protected:
     /// Create an integrator
     AdjointIntegrator(const Properties &props);
-
-    /// Virtual destructor
-    virtual ~AdjointIntegrator();
 
 protected:
     /**
@@ -562,6 +603,8 @@ protected:
 
     /// Depth to begin using russian roulette
     int m_rr_depth;
+
+    MI_TRAVERSE_CB(Base)
 };
 
 

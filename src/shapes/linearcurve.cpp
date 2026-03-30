@@ -105,16 +105,20 @@ points and increasing radii::
 
         'curves': {
             'type': 'linearcurve',
-            'to_world': mi.ScalarTransform4f.scale([2, 2, 2]).translate([1, 0, 0]),
+            'to_world': mi.ScalarAffineTransform4f().scale([2, 2, 2]).translate([1, 0, 0]),
             'filename': 'curves.txt'
         },
- */
+
+.. note:: The backfaces of curves are always culled. It is therefore impossible
+          to intersect the curve with a ray that's origin is inside of the curve.
+*/
 
 template <typename Float, typename Spectrum>
 class LinearCurve final : public Shape<Float, Spectrum> {
 public:
-    MI_IMPORT_BASE(Shape, m_to_world, m_to_object, m_is_instance, initialize,
-                   mark_dirty, get_children_string, parameters_grad_enabled)
+    MI_IMPORT_BASE(Shape, m_to_world, m_is_instance, m_shape_type,
+                   initialize, mark_dirty, get_children_string,
+                   parameters_grad_enabled)
     MI_IMPORT_TYPES()
 
     using typename Base::ScalarIndex;
@@ -134,8 +138,8 @@ public:
                   "variants!");
 #endif
 
-        auto fs = Thread::thread()->file_resolver();
-        fs::path file_path = fs->resolve(props.string("filename"));
+        auto fs = file_resolver();
+        fs::path file_path = fs->resolve(props.get<std::string_view>("filename"));
         std::string m_name = file_path.filename().string();
 
         // used for throwing an error later
@@ -217,7 +221,7 @@ public:
                 p[i] = string::strtof<InputFloat>(cur, (char **) &cur);
                 parse_error |= cur == orig;
             }
-            p = m_to_world.scalar().transform_affine(p);
+            p = m_to_world.scalar() * p;
 
             // Vertex radius
             InputFloat r;
@@ -301,6 +305,8 @@ public:
             util::time_string((float) timer.value())
         );
 
+        m_shape_type = ShapeType::LinearCurve;
+
         initialize();
     }
 
@@ -328,7 +334,7 @@ public:
 
         // It seems that the `v_local` given by Embree and OptiX has already
         // taken into account the changing radius: `v_local` is shifted such
-        // that the normal can be easily computed as `si.p - c`, 
+        // that the normal can be easily computed as `si.p - c`,
         // where `c = (1 - c_local) * cp1 + v_local * cp2`
         UInt32 idx = dr::gather<UInt32>(m_indices, prim_idx, active);
         Point4f c0 = dr::gather<Point4f>(m_control_points, idx, active),
@@ -338,7 +344,7 @@ public:
 
         Vector3f u_rot, u_rad;
         std::tie(u_rot, u_rad) = local_frame(dr::normalize(p1 - p0));
-        
+
         Point3f c = p0 * (1.f - v_local) + p1 * v_local;
         si.n = si.sh_frame.n = dr::normalize(si.p - c);
 
@@ -355,17 +361,18 @@ public:
             si.uv = Point2f(u, v);
         }
 
+        si.prim_index = pi.prim_index;
         si.shape    = this;
         si.instance = nullptr;
 
         return si;
     }
 
-    void traverse(TraversalCallback *callback) override {
-        Base::traverse(callback);
-        callback->put_parameter("control_point_count", m_control_point_count, +ParamFlags::NonDifferentiable);
-        callback->put_parameter("segment_indices",     m_indices,             +ParamFlags::NonDifferentiable);
-        callback->put_parameter("control_points",      m_control_points,       ParamFlags::Differentiable | ParamFlags::Discontinuous);
+    void traverse(TraversalCallback *cb) override {
+        Base::traverse(cb);
+        cb->put("control_point_count", m_control_point_count, ParamFlags::NonDifferentiable);
+        cb->put("segment_indices",     m_indices,             ParamFlags::NonDifferentiable);
+        cb->put("control_points",      m_control_points,      ParamFlags::NonDifferentiable);
     }
 
     void parameters_changed(const std::vector<std::string> &keys) override {
@@ -382,7 +389,6 @@ public:
 
 #if defined(MI_ENABLE_EMBREE)
     RTCGeometry embree_geometry(RTCDevice device) override {
-        dr::eval(m_control_points); // Make sure the buffer is evaluated
         RTCGeometry geom = rtcNewGeometry(device, RTC_GEOMETRY_TYPE_ROUND_LINEAR_CURVE);
 
         rtcSetSharedGeometryBuffer(geom, RTC_BUFFER_TYPE_VERTEX, 0, RTC_FORMAT_FLOAT4,
@@ -401,13 +407,11 @@ public:
     void optix_prepare_geometry() override { }
 
     void optix_build_input(OptixBuildInput &build_input) const override {
-        dr::eval(m_control_points); // Make sure the buffer is evaluated
         m_vertex_buffer_ptr = (CUdeviceptr*) m_control_points.data();
         m_radius_buffer_ptr = (CUdeviceptr*) (m_control_points.data() + 3);
-        m_index_buffer_ptr  = (CUdeviceptr*) m_indices.data();
 
-        build_input.type = OPTIX_BUILD_INPUT_TYPE_CURVES;
-        build_input.curveArray.curveType = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
+        build_input.type                            = OPTIX_BUILD_INPUT_TYPE_CURVES;
+        build_input.curveArray.curveType            = OPTIX_PRIMITIVE_TYPE_ROUND_LINEAR;
         build_input.curveArray.numPrimitives        = (unsigned int) dr::width(m_indices);
 
         build_input.curveArray.vertexBuffers        = (CUdeviceptr*) &m_vertex_buffer_ptr;
@@ -417,20 +421,16 @@ public:
         build_input.curveArray.widthBuffers         = (CUdeviceptr*) &m_radius_buffer_ptr;
         build_input.curveArray.widthStrideInBytes   = sizeof( InputFloat ) * 4;
 
-        build_input.curveArray.indexBuffer          = (CUdeviceptr) m_index_buffer_ptr;
+        build_input.curveArray.indexBuffer          = (CUdeviceptr) m_indices.data();
         build_input.curveArray.indexStrideInBytes   = sizeof( ScalarIndex );
 
         build_input.curveArray.normalBuffers        = 0;
         build_input.curveArray.normalStrideInBytes  = 0;
-        build_input.curveArray.flag                 = OPTIX_GEOMETRY_FLAG_NONE;
+        build_input.curveArray.flag                 = OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT;
         build_input.curveArray.primitiveIndexOffset = 0;
         build_input.curveArray.endcapFlags          = OPTIX_CURVE_ENDCAP_DEFAULT;
     }
 #endif
-
-    bool is_linear_curve() const override {
-        return true;
-    }
 
     ScalarBoundingBox3f bbox() const override {
         return m_bbox;
@@ -446,7 +446,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(LinearCurve)
 
 private:
     template <bool Negate, ScalarSize N>
@@ -493,8 +493,7 @@ private:
         Vector3f guide = Vector3f(0, 0, 1);
         Vector3f v_rot = dr::normalize(
             guide - dc_dv_normalized * dr::dot(dc_dv_normalized, guide));
-        Mask singular_mask =
-            dr::eq(dr::abs(dr::dot(guide, dc_dv_normalized)), 1.f);
+        Mask singular_mask = dr::abs(dr::dot(guide, dc_dv_normalized)) == 1.f;
         dr::masked(v_rot, singular_mask) =
             Vector3f(0, 1, 0); // non-consistent at singular points
         Vector3f v_rad = dr::cross(v_rot, dc_dv_normalized);
@@ -514,11 +513,10 @@ private:
     // For OptiX build input
     mutable void* m_vertex_buffer_ptr = nullptr;
     mutable void* m_radius_buffer_ptr = nullptr;
-    mutable void* m_index_buffer_ptr = nullptr;
 #endif
+
+    MI_TRAVERSE_CB(Base, m_indices, m_control_points)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(LinearCurve, Shape)
-MI_EXPORT_PLUGIN(LinearCurve, "Linear curve intersection primitive");
+MI_EXPORT_PLUGIN(LinearCurve)
 NAMESPACE_END(mitsuba)
-

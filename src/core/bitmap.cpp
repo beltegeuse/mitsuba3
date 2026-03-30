@@ -8,9 +8,14 @@
 #include <mitsuba/core/fstream.h>
 #include <mitsuba/core/profiler.h>
 #include <unordered_map>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <string>
+#include <thread>
 
 #include <nanothread/nanothread.h>
-#include <drjit/half.h>
+#include <drjit-core/half.h>
 
 /* libpng */
 #include <png.h>
@@ -89,6 +94,7 @@ Bitmap::Bitmap(const Bitmap &bitmap)
       m_size(bitmap.m_size),
       m_struct(new Struct(*bitmap.m_struct)),
       m_srgb_gamma(bitmap.m_srgb_gamma),
+      m_premultiplied_alpha(bitmap.m_premultiplied_alpha),
       m_owns_data(true) {
     size_t size = buffer_size();
     m_data = std::unique_ptr<uint8_t[]>(new uint8_t[size]);
@@ -103,6 +109,7 @@ Bitmap::Bitmap(Bitmap &&bitmap)
       m_size(bitmap.m_size),
       m_struct(std::move(bitmap.m_struct)),
       m_srgb_gamma(bitmap.m_srgb_gamma),
+      m_premultiplied_alpha(bitmap.m_premultiplied_alpha),
       m_owns_data(bitmap.m_owns_data) {
 }
 
@@ -171,9 +178,18 @@ void Bitmap::rebuild_struct(size_t channel_count, const std::vector<std::string>
         case PixelFormat::XYZA:  channels = { "X", "Y", "Z", "A"};      break;
         case PixelFormat::MultiChannel:
             if (channel_names.size() == 0) {
+                // Compute number of digits required for channel count - 1 to prepend zeros and ensure
+                // alphanumerical ordering of channel names
+                int num_digits = std::floor(std::log10(std::max<size_t>(1, channel_count - 1))) + 1;
+                std::string channel_format = tfm::format("ch%%0%dd", num_digits);
                 for (size_t i = 0; i < channel_count; ++i)
-                    channels.push_back(tfm::format("ch%i", i));
+                    channels.push_back(tfm::format(channel_format.c_str(), i));
             } else {
+                if (channel_names.size() != channel_count)
+                    Throw("Bitmap::rebuild_struct(): expected %u channel "
+                          "names, but only got %u!",
+                          channel_count, channel_names.size());
+
                 std::vector<std::string> channels_sorted = channel_names;
                 std::sort(channels_sorted.begin(), channels_sorted.end());
                 for (size_t i = 1; i < channels_sorted.size(); ++i) {
@@ -259,7 +275,7 @@ resample(Bitmap *target, const Bitmap *source,
     if (!rfilter) {
         // Upsample using a 2-lobed Lanczos reconstruction filter
         Properties props("lanczos");
-        props.set_int("lobes", 2);
+        props.set("lobes", 2);
         rfilter = PluginManager::instance()->create_object<ReconstructionFilter>(props);
     }
 
@@ -338,9 +354,9 @@ void Bitmap::resample(
         Throw("Bitmap::resample(): Incompatible source and target bitmaps!");
 
     if (temp && (pixel_format() != temp->pixel_format() ||
-                 component_format() != temp->component_format() ||
+                (component_format() != temp->component_format()) ||
                  channel_count() != temp->channel_count() ||
-                 temp->size() != Vector2u(target->width(), height())))
+                 dr::all(temp->size() != Vector2u(target->width(), height()))))
         Throw("Bitmap::resample(): Incompatible temporary bitmap specified!");
 
     switch (m_component_format) {
@@ -404,7 +420,7 @@ ref<Bitmap> Bitmap::convert(PixelFormat pixel_format,
 }
 
 void Bitmap::convert(Bitmap *target) const {
-    if (m_size != target->size())
+    if (dr::all(m_size != target->size()))
         Throw("Bitmap::convert(): Incompatible target size!"
               " This: %s vs target: %s)", m_size, target->size());
 
@@ -805,21 +821,22 @@ void Bitmap::write(Stream *stream, FileFormat format, int quality) const {
 
 void Bitmap::write_async(const fs::path &path, FileFormat format, int quality) const {
     this->inc_ref();
-    Task *task = dr::do_async([path, format, quality, this](){
+    Task *task = dr::do_async([path, format, quality, this]() {
         write(path, format, quality);
-        this->dec_ref();
+        if (this->dec_ref())
+            delete this;
     });
     Thread::register_task(task);
 }
 
 bool Bitmap::operator==(const Bitmap &bitmap) const {
-    if (m_pixel_format != bitmap.m_pixel_format ||
+    if (dr::all(m_pixel_format != bitmap.m_pixel_format ||
         m_component_format != bitmap.m_component_format ||
         m_size != bitmap.m_size ||
         m_srgb_gamma != bitmap.m_srgb_gamma ||
         m_premultiplied_alpha != bitmap.m_premultiplied_alpha ||
         *m_struct != *bitmap.m_struct ||
-        m_metadata != bitmap.m_metadata)
+        m_metadata != bitmap.m_metadata))
         return false;
     return memcmp(uint8_data(), bitmap.uint8_data(), buffer_size()) == 0;
 }
@@ -833,19 +850,19 @@ std::string Bitmap::to_string() const {
         << "  srgb_gamma = " << m_srgb_gamma << "," << std::endl
         << "  struct = " << string::indent(m_struct) << "," << std::endl;
 
-    std::vector<std::string> keys = m_metadata.property_names();
-    if (!keys.empty()) {
+    if (!m_metadata.empty()) {
         oss << "  metadata = {" << std::endl;
-        for (auto it = keys.begin(); it != keys.end(); ) {
-            std::string value = m_metadata.as_string(*it);
+        size_t i = 0;
+        for (auto &kv : m_metadata) {
+            std::string value = m_metadata.as_string(kv.name());
             if (value.length() > 50) {
                 value = value.substr(0, 50);
                 if (value[0] == '\"')
                     value += '\"';
                 value += ".. [truncated]";
             }
-            oss << "    " << *it << " => " << value;
-            if (++it != keys.end())
+            oss << "    " << kv.name() << " => " << value;
+            if (++i < m_metadata.size())
                 oss << ",";
             oss << std::endl;
         }
@@ -941,33 +958,40 @@ void Bitmap::read_exr(Stream *stream) {
 
     // Load metadata if present
     for (auto it = header.begin(); it != header.end(); ++it) {
-        std::string name = it.name();
+        std::string_view name = it.name();
         const Imf::Attribute *attr = &it.attribute();
-        std::string type_name = attr->typeName();
+        std::string_view type_name = attr->typeName();
 
         if (type_name == "string") {
             auto v = static_cast<const Imf::StringAttribute *>(attr);
-            m_metadata.set_string(name, v->value());
+            m_metadata.set(name, v->value());
         } else if (type_name == "int") {
             auto v = static_cast<const Imf::IntAttribute *>(attr);
-            m_metadata.set_long(name, v->value());
+            m_metadata.set(name, v->value());
         } else if (type_name == "float") {
             auto v = static_cast<const Imf::FloatAttribute *>(attr);
-            m_metadata.set_float(name, Properties::Float(v->value()));
+            m_metadata.set(name, (double)(v->value()));
         } else if (type_name == "double") {
             auto v = static_cast<const Imf::DoubleAttribute *>(attr);
-            m_metadata.set_float(name, Properties::Float(v->value()));
+            m_metadata.set(name, (double)(v->value()));
         } else if (type_name == "v3f") {
             auto v = static_cast<const Imf::V3fAttribute *>(attr);
             Imath::V3f vec = v->value();
-            m_metadata.set_array3f(name, Vector3f(vec.x, vec.y, vec.z));
+            m_metadata.set(name, Vector3f(vec.x, vec.y, vec.z));
         } else if (type_name == "m44f") {
             auto v = static_cast<const Imf::M44fAttribute *>(attr);
             Matrix4f M;
             for (size_t i = 0; i < 4; ++i)
                 for (size_t j = 0; j < 4; ++j)
                     M(i, j) = v->value().x[i][j];
-            m_metadata.set_transform(name, Transform4f(M));
+            m_metadata.set(name, AffineTransform4f(M));
+        } else if (type_name == "m33f") {
+            auto v = static_cast<const Imf::M33fAttribute *>(attr);
+            Matrix4f M = dr::identity<Matrix4f>();
+            for (size_t i = 0; i < 3; ++i)
+                for (size_t j = 0; j < 3; ++j)
+                    M(i, j) = v->value().x[i][j];
+            m_metadata.set(name, AffineTransform4f(M));
         }
     }
 
@@ -1122,7 +1146,7 @@ void Bitmap::read_exr(Stream *stream) {
         Vector2i sampling(channel.xSampling, channel.ySampling);
         Imf::Slice slice;
 
-        if (sampling == Vector2i(1)) {
+        if (dr::all(sampling == Vector2i(1))) {
             // This is a full resolution channel. Load the ordinary way
             slice = Imf::Slice(pixel_type, (char *) (ptr + field.offset),
                                pixel_stride, row_stride);
@@ -1152,7 +1176,32 @@ void Bitmap::read_exr(Stream *stream) {
         m_pixel_format, m_component_format);
 
     file.setFrameBuffer(framebuffer);
-    file.readPixels(data_window.min.y, data_window.max.y);
+
+    if (pool_thread_id()) {
+        // We are being is called from a nanothread worker ,e.g., because of
+        // parallel scene loading. The function ``file.readPixels()`` below
+        // sleeps, which can cause a serious starvation issue where the entire
+        // worker pool waits for a large number of parallel reads to finish.
+        //
+        // The following works around the issue by performing the readPixels() call
+        // from a temporary thread. It then resumes working on nanothread tasks until
+        // the image is fully loaded.
+
+        std::atomic<bool> done(false);
+        std::thread t(
+            [&] { file.readPixels(data_window.min.y, data_window.max.y); done = true; });
+
+        pool_work_until(
+            nullptr,
+            [](void *p) -> bool {
+                return ((std::atomic<bool> *) p)->load(std::memory_order_relaxed);
+            },
+            &done);
+
+        t.join();
+    } else {
+        file.readPixels(data_window.min.y, data_window.max.y);
+    }
 
     for (auto &buf: resample_buffers) {
         Log(Debug, "Upsampling layer \"%s\" from %ix%i to %ix%i pixels",
@@ -1209,7 +1258,7 @@ void Bitmap::read_exr(Stream *stream) {
         };
 
         switch (m_component_format) {
-            case Struct::Type::Float16: convert((dr::half *) m_data.get()); break;
+            case Struct::Type::Float16: convert((dr::half *)    m_data.get()); break;
             case Struct::Type::Float32: convert((float *)       m_data.get()); break;
             case Struct::Type::UInt32:  convert((uint32_t*)     m_data.get()); break;
             default: Throw("Internal error!");
@@ -1280,7 +1329,7 @@ void Bitmap::read_exr(Stream *stream) {
         };
 
         switch (m_component_format) {
-            case Struct::Type::Float16: convert((dr::half *) m_data.get()); break;
+            case Struct::Type::Float16: convert((dr::half *)    m_data.get()); break;
             case Struct::Type::Float32: convert((float *)       m_data.get()); break;
             case Struct::Type::UInt32:  convert((uint32_t*)     m_data.get()); break;
             default: Throw("Internal error!");
@@ -1295,9 +1344,7 @@ void Bitmap::write_exr(Stream *stream, int quality) const {
 
     Properties metadata(m_metadata);
     if (!metadata.has_property("generatedBy"))
-        metadata.set_string("generatedBy", "Mitsuba version " MI_VERSION);
-
-    std::vector<std::string> keys = metadata.property_names();
+        metadata.set("generatedBy", "Mitsuba version " MI_VERSION);
 
     Imf::Header header(
         (int) m_size.x(),  // width
@@ -1312,33 +1359,35 @@ void Bitmap::write_exr(Stream *stream, int quality) const {
     if (quality > 0)
         Imf::addDwaCompressionLevel(header, float(quality));
 
-    for (auto it = keys.begin(); it != keys.end(); ++it) {
+    for (auto &prop : metadata) {
         using Type = Properties::Type;
 
-        Type type = metadata.type(*it);
-        if (*it == "pixelAspectRatio" || *it == "screenWindowWidth" ||
-            *it == "screenWindowCenter")
+        if (prop.name() == "pixelAspectRatio" ||
+            prop.name() == "screenWindowWidth" ||
+            prop.name() == "screenWindowCenter")
             continue;
 
-        switch (type) {
+        const char *name = prop.name().data();
+
+        switch (prop.type()) {
             case Type::String:
-                header.insert(it->c_str(), Imf::StringAttribute(metadata.string(*it)));
+                header.insert(name, Imf::StringAttribute(std::string(prop.get<std::string_view>())));
                 break;
-            case Type::Long:
-                header.insert(it->c_str(), Imf::IntAttribute(metadata.get<int>(*it)));
+            case Type::Integer:
+                header.insert(name, Imf::IntAttribute(prop.get<int>()));
                 break;
             case Type::Float:
-                header.insert(it->c_str(), Imf::DoubleAttribute(metadata.get<double>(*it)));
+                header.insert(name, Imf::DoubleAttribute(prop.get<double>()));
                 break;
-            case Type::Array3f: {
-                    Vector3f val = metadata.get<Vector3f>(*it);
-                    header.insert(it->c_str(), Imf::V3fAttribute(
+            case Type::Vector: {
+                    Vector3f val = prop.get<Vector3f>();
+                    header.insert(name, Imf::V3fAttribute(
                         Imath::V3f((float) val.x(), (float) val.y(), (float) val.z())));
                 }
                 break;
             case Type::Transform: {
-                    Matrix4f val = metadata.get<ScalarTransform4f>(*it).matrix;
-                    header.insert(it->c_str(), Imf::M44fAttribute(Imath::M44f(
+                    Matrix4f val = prop.get<ScalarAffineTransform4f>().matrix;
+                    header.insert(name, Imf::M44fAttribute(Imath::M44f(
                         (float) val(0, 0), (float) val(0, 1),
                         (float) val(0, 2), (float) val(0, 3),
                         (float) val(1, 0), (float) val(1, 1),
@@ -1350,7 +1399,7 @@ void Bitmap::write_exr(Stream *stream, int quality) const {
                 }
                 break;
             default:
-                header.insert(it->c_str(), Imf::StringAttribute(metadata.as_string(*it)));
+                header.insert(name, Imf::StringAttribute(metadata.as_string(prop.name())));
                 break;
         }
     }
@@ -1677,6 +1726,8 @@ void Bitmap::read_png(Stream *stream) {
             png_set_swap(png_ptr); // Swap the byte order on little endian machines
     #endif
 
+    png_set_interlace_handling(png_ptr);
+
     // Update the information based on the transformations
     png_read_update_info(png_ptr, info_ptr);
     png_get_IHDR(png_ptr, info_ptr, &width, &height, &bit_depth,
@@ -1708,7 +1759,7 @@ void Bitmap::read_png(Stream *stream) {
     png_get_text(png_ptr, info_ptr, &text_ptr, &text_idx);
 
     for (int i = 0; i < text_idx; ++i, text_ptr++)
-        m_metadata.set_string(text_ptr->key, text_ptr->text);
+        m_metadata.set(text_ptr->key, text_ptr->text);
 
     auto fs = dynamic_cast<FileStream *>(stream);
     Log(Debug, "Loading PNG file \"%s\" (%ix%i, %s, %s) ..",
@@ -1782,22 +1833,28 @@ void Bitmap::write_png(Stream *stream, int compression) const {
 
     Properties metadata(m_metadata);
     if (!metadata.has_property("generated_by"))
-        metadata.set_string("generated_by", "Mitsuba version " MI_VERSION);
+        metadata.set("generated_by", "Mitsuba version " MI_VERSION);
 
-    std::vector<std::string> keys = metadata.property_names();
-    std::vector<std::string> values(keys.size());
+    size_t metadata_count = metadata.size();
+    std::vector<std::string> keys, values;
+    keys.reserve(metadata_count);
+    values.reserve(metadata_count);
 
-    text = new png_text[keys.size()];
-    memset(text, 0, sizeof(png_text) * keys.size());
+    for (auto &kv : metadata) {
+        keys.emplace_back(kv.name());
+        values.push_back(metadata.as_string(kv.name()));
+    }
 
-    for (size_t i = 0; i<keys.size(); ++i) {
-        values[i] = metadata.as_string(keys[i]);
+    text = new png_text[metadata_count];
+    memset(text, 0, sizeof(png_text) * metadata_count);
+
+    for (size_t i = 0; i < metadata_count; ++i) {
         text[i].key = const_cast<char *>(keys[i].c_str());
         text[i].text = const_cast<char *>(values[i].c_str());
         text[i].compression = PNG_TEXT_COMPRESSION_NONE;
     }
 
-    png_set_text(png_ptr, info_ptr, text, (int) keys.size());
+    png_set_text(png_ptr, info_ptr, text, (int) metadata_count);
 
     if (m_srgb_gamma)
         png_set_sRGB_gAMA_and_cHRM(png_ptr, info_ptr, PNG_sRGB_INTENT_ABSOLUTE);
@@ -2109,10 +2166,9 @@ void Bitmap::write_rgbe(Stream *stream) const {
 
     stream->write_line("#?RGBE");
 
-    std::vector<std::string> keys = m_metadata.property_names();
-    for (auto key : keys) {
-        stream->write_line(tfm::format("# Metadata [%s]:", key));
-        std::istringstream iss(m_metadata.as_string(key));
+    for (auto &kv : m_metadata) {
+        stream->write_line(tfm::format("# Metadata [%s]:", kv.name()));
+        std::istringstream iss(m_metadata.as_string(kv.name()));
         std::string buf;
         while (std::getline(iss, buf))
             stream->write_line(tfm::format("#   %s", buf));
@@ -2502,7 +2558,5 @@ void Bitmap::static_initialization() {
 }
 
 void Bitmap::static_shutdown() { }
-
-MI_IMPLEMENT_CLASS(Bitmap, Object)
 
 NAMESPACE_END(mitsuba)

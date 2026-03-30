@@ -2,98 +2,73 @@
 #include <mitsuba/core/plugin.h>
 #include <mitsuba/core/properties.h>
 #include <mitsuba/python/python.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/string_view.h>
+#include <nanobind/stl/vector.h>
 
-extern py::object cast_object(Object *o);
-
-// Trampoline for derived types implemented in Python
-class PyTraversalCallback : public TraversalCallback {
-public:
-    void put_parameter_impl(const std::string &name, void *ptr,
-                            uint32_t flags, const std::type_info &type) override {
-        py::gil_scoped_acquire gil;
-        py::function overload = py::get_overload(this, "put_parameter");
-
-        if (overload)
-            overload(name, ptr, flags, (void *) &type);
-        else
-            Throw("TraversalCallback doesn't overload the method \"put_parameter\"");
-    }
-
-    void put_object(const std::string &name, Object *obj,
-                    uint32_t flags) override {
-        py::gil_scoped_acquire gil;
-        py::function overload = py::get_overload(this, "put_object");
-
-        if (overload)
-            overload(name, cast_object(obj), flags);
-        else
-            Throw("TraversalCallback doesn't overload the method \"put_object\"");
-    }
-};
+extern nb::object cast_object(Object *o);
 
 MI_PY_EXPORT(Object) {
-    auto e = py::enum_<ParamFlags>(m, "ParamFlags", D(ParamFlags))
+    auto e = nb::enum_<ParamFlags>(m, "ParamFlags", nb::is_arithmetic(), D(ParamFlags))
         .def_value(ParamFlags, Differentiable)
         .def_value(ParamFlags, NonDifferentiable)
-        .def_value(ParamFlags, Discontinuous);
-    MI_PY_DECLARE_ENUM_OPERATORS(ParamFlags, e)
+        .def_value(ParamFlags, Discontinuous)
+        .def_value(ParamFlags, ReadOnly);
 
-    py::class_<Class>(m, "Class", D(Class))
-        .def_method(Class, name)
-        .def_method(Class, variant)
-        .def_method(Class, alias)
-        .def_method(Class, parent, py::return_value_policy::reference);
+    nb::enum_<ObjectType>(m, "ObjectType", D(ObjectType))
+        .def_value(ObjectType, Unknown)
+        .def_value(ObjectType, Scene)
+        .def_value(ObjectType, Sensor)
+        .def_value(ObjectType, Film)
+        .def_value(ObjectType, Emitter)
+        .def_value(ObjectType, Sampler)
+        .def_value(ObjectType, Shape)
+        .def_value(ObjectType, Texture)
+        .def_value(ObjectType, Volume)
+        .def_value(ObjectType, Medium)
+        .def_value(ObjectType, BSDF)
+        .def_value(ObjectType, Integrator)
+        .def_value(ObjectType, PhaseFunction)
+        .def_value(ObjectType, ReconstructionFilter);
 
-    py::class_<PluginManager, std::unique_ptr<PluginManager, py::nodelete>>(
+    nb::class_<PluginManager>(
         m, "PluginManager", D(PluginManager))
-        .def_static_method(PluginManager, instance,
-                           py::return_value_policy::reference)
-        .def("get_plugin_class",
-             [](PluginManager &pmgr, const std::string &name,
-                const std::string &variant) {
-                 try {
-                     return pmgr.get_plugin_class(name, variant);
-                 } catch (std::runtime_error &) {
-                     return static_cast<const Class *>(nullptr);
-                 }
-             },
-             "name"_a, "variant"_a, py::return_value_policy::reference,
-             D(PluginManager, get_plugin_class))
+        .def_static_method(PluginManager, instance, nb::rv_policy::reference)
         .def("create_object", [](PluginManager &pmgr, const Properties &props) {
-            auto mi = py::module_::import("mitsuba");
-            std::string variant = py::cast<std::string>(mi.attr("variant")());
-            const Class *class_ = pmgr.get_plugin_class(props.plugin_name(), variant);
-            return cast_object(pmgr.create_object(props, class_));
-        }, D(PluginManager, create_object));
+            auto mi = nb::module_::import_("mitsuba");
+            std::string variant = nb::cast<std::string>(mi.attr("variant")());
+            return cast_object(pmgr.create_object(props, variant, ObjectType::Unknown).get());
+        }, "props"_a, D(PluginManager, create_object))
+        .def("plugin_type", &PluginManager::plugin_type, "name"_a,
+             "Get the ObjectType of a plugin by name");
 
-    py::class_<TraversalCallback, PyTraversalCallback>(
-        m, "TraversalCallback", D(TraversalCallback))
-        .def(py::init<>())
-        .def("put_parameter",
-             [] (const TraversalCallback *, const std::string &, py::object &, ParamFlags) {
-                Throw("The `put_parameter` methods must be overriden!");
-             },
-             "name"_a, "value"_a, "flags"_a, D(TraversalCallback, put_parameter))
-        .def_method(TraversalCallback, put_object, "name"_a, "obj"_a, "flags"_a);
-
-    py::class_<Object, ref<Object>>(m, "Object", D(Object))
-        .def(py::init<>(), D(Object, Object))
-        .def(py::init<const Object &>(), D(Object, Object, 2))
+    nb::class_<Object, drjit::TraversableBase>(
+        m, "Object",
+        nb::intrusive_ptr<Object>([](Object *o, PyObject *po) noexcept {
+            PyObject *other = o->self_py();
+            if (!other) {
+                o->set_self_py(po);
+            } else {
+                nb::detail::keep_alive(po, other);
+                nb::detail::nb_inst_set_state(po, true, false);
+            }
+        }),
+        D(Object))
+        .def(nb::init<>(), D(Object, Object))
+        .def(nb::init<const Object &>(), D(Object, Object, 2))
         .def_method(Object, id)
         .def_method(Object, set_id, "id"_a)
-        .def_method(Object, ref_count)
-        .def_method(Object, inc_ref)
-        .def_method(Object, dec_ref, "dealloc"_a = true)
-        .def("expand", [](const Object &o) -> py::list {
+        .def_method(Object, class_name)
+        .def("variant_name", &Object::variant_name, D(Object, variant_name))
+        .def("expand", [=](const Object &o) -> nb::list {
             auto result = o.expand();
-            py::list l;
-            for (Object *o2: result)
-                l.append(cast_object(o2));
+            nb::list l;
+            for (auto o2: result)
+                l.append(cast_object(o2.get()));
             return l;
         }, D(Object, expand))
         .def_method(Object, traverse, "cb"_a)
-        .def_method(Object, parameters_changed, "keys"_a = py::list())
-        .def_property_readonly("ptr", [](Object *self) { return (uintptr_t) self; })
-        .def("class_", &Object::class_, py::return_value_policy::reference, D(Object, class))
+        .def_method(Object, parameters_changed, "keys"_a = nb::list())
+        .def_prop_ro("ptr", [](Object *self) { return (uintptr_t) self; })
         .def("__repr__", &Object::to_string, D(Object, to_string));
 }

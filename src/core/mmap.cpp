@@ -270,7 +270,7 @@ const fs::path &MemoryMappedFile::filename() const {
 }
 
 ref<MemoryMappedFile> MemoryMappedFile::create_temporary(size_t size) {
-    ref<MemoryMappedFile> result = new MemoryMappedFile();
+    MemoryMappedFile* result = new MemoryMappedFile();
     result->d->size = size;
     result->d->create_temp();
     return result;
@@ -284,7 +284,5 @@ std::string MemoryMappedFile::to_string() const {
         << "]";
     return oss.str();
 }
-
-MI_IMPLEMENT_CLASS(MemoryMappedFile, Object)
 
 NAMESPACE_END(mitsuba)

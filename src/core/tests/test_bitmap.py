@@ -5,7 +5,7 @@ import pytest
 import drjit as dr
 import mitsuba as mi
 
-from mitsuba.scalar_rgb.test.util import find_resource
+from mitsuba.test.util import find_resource
 
 
 def test_read_convert_yc(variant_scalar_rgb, tmpdir):
@@ -39,9 +39,7 @@ def test_read_write_complex_exr(variant_scalar_rgb, tmpdir):
     meta["int_prop"] = 15
     meta["dbl_prop"] = 30.0
     meta["vec3_prop"] = [1.0, 2.0, 3.0]
-
-    # TODO py::implicitly_convertible<py::array, Transform4f>() doesn't seem to work in transform_v.cpp
-    # meta["mat_prop"] = np.arange(16, dtype=mi.float_dtype).reshape((4, 4)) + np.eye(4, dtype=mi.float_dtype)
+    meta["mat_prop"] = dr.scalar.Matrix4f(np.arange(16, dtype=np.float32).reshape((4, 4)))
 
     assert b2.shape == (5, 4, 6)
     assert b2.dtype == np.float32
@@ -51,19 +49,33 @@ def test_read_write_complex_exr(variant_scalar_rgb, tmpdir):
 
     b3 = mi.Bitmap(tmp_file)
     os.remove(tmp_file)
-    meta = b3.metadata()
-    meta.remove_property("generatedBy")
-    meta.remove_property("pixelAspectRatio")
-    meta.remove_property("screenWindowWidth")
+    meta2 = b3.metadata()
+    del meta2["generatedBy"]
+    del meta2["pixelAspectRatio"]
+    del meta2["screenWindowWidth"]
     assert b3 == b1
     b2[0, 0, 0] = 3
     assert b3 != b1
     b2[0, 0, 0] = 0
     assert b3 == b1
-    assert str(b3) == str(b1)
     meta["str_prop"] = "value2"
     assert b3 != b1
     assert str(b3) != str(b1)
+
+
+@pytest.mark.parametrize('num_channels', [1, 3, 4, 9, 10, 11])
+def test_read_write_unnamed_multichannel_exr(variant_scalar_rgb, tmpdir, num_channels):
+    # Tests reading and writing of images with unnamed channels to/from exr
+    ref = np.zeros((16, 16, num_channels), dtype=np.float32)
+    for i in range(num_channels):
+        ref[..., i] = i
+
+    tmp_file = os.path.join(str(tmpdir), f"out_{num_channels}.exr")
+    b = mi.Bitmap(ref)
+    b.write(tmp_file)
+    b = mi.Bitmap(tmp_file)
+    os.remove(tmp_file)
+    assert np.allclose(np.array(b), ref)
 
 
 def test_convert_rgb_y(variant_scalar_rgb, tmpdir):
@@ -221,6 +233,34 @@ def test_read_tga(variant_scalar_rgb):
     assert b1 == b2
 
 
+@pytest.mark.parametrize('file_format',
+                         [mi.Bitmap.FileFormat.JPEG,
+                          mi.Bitmap.FileFormat.PPM,
+                          mi.Bitmap.FileFormat.PNG])
+def test_read_write_memorystream_uint8(variant_scalar_rgb, np_rng, file_format):
+    ref = np.uint8(np_rng.random((10, 10, 3)) * 255)
+    b = mi.Bitmap(ref)
+    stream = mi.MemoryStream()
+    b.write(stream, file_format)
+    stream.seek(0)
+    b2 = mi.Bitmap(stream)
+    assert np.sum(np.abs(np.float32(np.array(b2))-ref)) / (3*10*10*255) < 0.2
+
+
+@pytest.mark.parametrize('file_format',
+                         [mi.Bitmap.FileFormat.OpenEXR,
+                          mi.Bitmap.FileFormat.RGBE,
+                          mi.Bitmap.FileFormat.PFM])
+def test_read_write_memorystream_float32(variant_scalar_rgb, np_rng, file_format):
+    ref = np.float32(np_rng.random((10, 10, 3)))
+    b = mi.Bitmap(ref)
+    stream = mi.MemoryStream()
+    b.write(stream, file_format)
+    stream.seek(0)
+    b2 = mi.Bitmap(stream)
+    assert np.abs(np.mean(np.array(b2)-ref)) < 1e-2
+
+
 def test_accumulate(variant_scalar_rgb):
     # ----- Accumulate the whole bitmap
     b1 = mi.Bitmap(mi.Bitmap.PixelFormat.RGB, mi.Struct.Type.UInt8, [10, 10])
@@ -267,7 +307,6 @@ def test_split(variant_scalar_rgb):
         "multi": set(["X", "B", "A"]),
         "lum": set(["Y", "A"])
     }
-    #print(splits)
 
     assert len(splits) == len(fields.keys())
     assert set([split[0] for split in splits]) == set(fields.keys())
@@ -312,7 +351,7 @@ def test_construct_from_array(variants_all_rgb):
     b_np = np.array(b)
     b_t = mi.TensorXf(b_np)
 
-    assert dr.allclose(b_np, b_t)
+    assert dr.allclose(np.ravel(b_np), b_t.array.numpy())
 
     b1 = mi.Bitmap(b_np)
     b2 = mi.Bitmap(b_t)
@@ -341,7 +380,7 @@ def test_construct_from_non_contiguous_array(variants_all_rgb):
 
 def test_construct_from_int8_array(variants_all_rgb):
     # test uint8
-    b_np = np.reshape(np.arange(16), (4, 4)).astype(np.uint8)
+    b_np = np.reshape(np.arange(16), (4, 4, 1)).astype(np.uint8)
     b1 = mi.Bitmap(b_np)
     assert dr.allclose(b_np, np.array(b1))
 

@@ -72,13 +72,14 @@ public:
     MI_IMPORT_TYPES()
 
     TwoSidedBRDF(const Properties &props) : Base(props) {
-        auto bsdfs = props.objects();
-        if (bsdfs.size() > 0)
-            m_brdf[0] = dynamic_cast<Base *>(bsdfs[0].second.get());
-        if (bsdfs.size() == 2)
-            m_brdf[1] = dynamic_cast<Base *>(bsdfs[1].second.get());
-        else if (bsdfs.size() > 2)
-            Throw("At most two nested BSDFs can be specified!");
+        size_t bsdf_count = 0;
+        for (auto &prop : props.objects()) {
+            if (Base *bsdf = prop.try_get<Base>()) {
+                if (bsdf_count >= 2)
+                    Throw("At most two nested BSDFs can be specified!");
+                m_brdf[bsdf_count++] = bsdf;
+            }
+        }
 
         if (!m_brdf[0])
             Throw("A nested one-sided material is required!");
@@ -97,15 +98,14 @@ public:
             m_components.push_back(c | BSDFFlags::BackSide);
             m_flags = m_flags | m_components.back();
         }
-        dr::set_attr(this, "flags", m_flags);
 
-        if (has_flag(m_flags, BSDFFlags::Transmission))
+        if (!props.get<bool>("allow_transmission", false) && has_flag(m_flags, BSDFFlags::Transmission))
             Throw("Only materials without a transmission component can be nested!");
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_object("brdf_0", m_brdf[0].get(), +ParamFlags::Differentiable);
-        callback->put_object("brdf_1", m_brdf[1].get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("brdf_0", m_brdf[0], ParamFlags::Differentiable);
+        cb->put("brdf_1", m_brdf[1], ParamFlags::Differentiable);
     }
 
     std::pair<BSDFSample3f, Spectrum> sample(const BSDFContext &ctx_,
@@ -257,6 +257,30 @@ public:
         return { value, pdf };
     }
 
+    Spectrum eval_null_transmission(const SurfaceInteraction3f &si_, Mask active) const override {
+        SurfaceInteraction3f si(si_);
+
+        if (m_brdf[0] == m_brdf[1]) {
+            si.wi.z() = dr::abs(si.wi.z());
+            return m_brdf[0]->eval_null_transmission(si, active);
+        } else {
+            Spectrum result = 0.f;
+            Mask front_side = Frame3f::cos_theta(si.wi) > 0.f && active,
+                 back_side  = Frame3f::cos_theta(si.wi) < 0.f && active;
+
+            if (dr::any_or<true>(front_side))
+                result = m_brdf[0]->eval_null_transmission(si, front_side);
+
+            if (dr::any_or<true>(back_side)) {
+                si.wi.z() *= -1.f;
+                dr::masked(result, back_side) =
+                    m_brdf[1]->eval_null_transmission(si, back_side);
+            }
+
+            return result;
+        }
+    }
+
     Spectrum eval_diffuse_reflectance(const SurfaceInteraction3f &si_,
                                       Mask active) const override {
         SurfaceInteraction3f si(si_);
@@ -282,6 +306,89 @@ public:
         }
     }
 
+    Mask has_attribute(const std::string &name, Mask active) const override {
+        if (m_brdf[0] == m_brdf[1])
+            return m_brdf[0]->has_attribute(name, active);
+        else
+            return m_brdf[0]->has_attribute(name, active) ||
+                   m_brdf[1]->has_attribute(name, active);
+    }
+
+    UnpolarizedSpectrum eval_attribute(const std::string &name,
+                                       const SurfaceInteraction3f &si_,
+                                       Mask active) const override {
+        SurfaceInteraction3f si(si_);
+        if (m_brdf[0] == m_brdf[1]) {
+            si.wi.z() = dr::abs(si.wi.z());
+            return m_brdf[0]->eval_attribute(name, si, active);
+        } else {
+            UnpolarizedSpectrum result = 0.f;
+            Mask front_side = Frame3f::cos_theta(si.wi) > 0.f && active,
+                 back_side  = Frame3f::cos_theta(si.wi) < 0.f && active;
+
+            if (dr::any_or<true>(front_side))
+                result = m_brdf[0]->eval_attribute(name, si, front_side);
+
+            if (dr::any_or<true>(back_side)) {
+                si.wi.z() *= -1.f;
+                dr::masked(result, back_side) =
+                    m_brdf[1]->eval_attribute(name, si, back_side);
+            }
+
+            return result;
+        }
+    }
+
+    Float eval_attribute_1(const std::string &name,
+                           const SurfaceInteraction3f &si_,
+                           Mask active) const override {
+        SurfaceInteraction3f si(si_);
+        if (m_brdf[0] == m_brdf[1]) {
+            si.wi.z() = dr::abs(si.wi.z());
+            return m_brdf[0]->eval_attribute_1(name, si, active);
+        } else {
+            Float result = 0.f;
+            Mask front_side = Frame3f::cos_theta(si.wi) > 0.f && active,
+                 back_side  = Frame3f::cos_theta(si.wi) < 0.f && active;
+
+            if (dr::any_or<true>(front_side))
+                result = m_brdf[0]->eval_attribute_1(name, si, front_side);
+
+            if (dr::any_or<true>(back_side)) {
+                si.wi.z() *= -1.f;
+                dr::masked(result, back_side) =
+                    m_brdf[1]->eval_attribute_1(name, si, back_side);
+            }
+
+            return result;
+        }
+    }
+
+    Color3f eval_attribute_3(const std::string &name,
+                            const SurfaceInteraction3f &si_,
+                            Mask active) const override {
+        SurfaceInteraction3f si(si_);
+        if (m_brdf[0] == m_brdf[1]) {
+            si.wi.z() = dr::abs(si.wi.z());
+            return m_brdf[0]->eval_attribute_3(name, si, active);
+        } else {
+            Color3f result = 0.f;
+            Mask front_side = Frame3f::cos_theta(si.wi) > 0.f && active,
+                 back_side  = Frame3f::cos_theta(si.wi) < 0.f && active;
+
+            if (dr::any_or<true>(front_side))
+                result = m_brdf[0]->eval_attribute_3(name, si, front_side);
+
+            if (dr::any_or<true>(back_side)) {
+                si.wi.z() *= -1.f;
+                dr::masked(result, back_side) =
+                    m_brdf[1]->eval_attribute_3(name, si, back_side);
+            }
+
+            return result;
+        }
+    }
+
     std::string to_string() const override {
         std::ostringstream oss;
         oss << "TwoSided[" << std::endl
@@ -291,11 +398,12 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(TwoSidedBRDF)
 protected:
     ref<Base> m_brdf[2];
+
+    MI_TRAVERSE_CB(Base, m_brdf[0], m_brdf[1])
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(TwoSidedBRDF, BSDF)
-MI_EXPORT_PLUGIN(TwoSidedBRDF, "Two-sided material adapter")
+MI_EXPORT_PLUGIN(TwoSidedBRDF)
 NAMESPACE_END(mitsuba)

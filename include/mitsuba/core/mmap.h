@@ -19,6 +19,9 @@ public:
     /// Map the specified file into memory
     MemoryMappedFile(const fs::path &filename, bool write = false);
 
+    /// Release all resources
+    virtual ~MemoryMappedFile();
+
     /// Return a pointer to the file contents in memory
     void *data();
 
@@ -55,13 +58,10 @@ public:
      */
     static ref<MemoryMappedFile> create_temporary(size_t size);
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(MemoryMappedFile)
 protected:
     /// Internal constructor
     MemoryMappedFile();
-
-    /// Release all resources
-    virtual ~MemoryMappedFile();
 
 private:
     struct MemoryMappedFilePrivate;

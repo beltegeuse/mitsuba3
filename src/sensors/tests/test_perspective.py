@@ -15,7 +15,7 @@ def create_camera(o, d, fov=34, fov_axis="x", s_open=1.5, s_close=5, near_clip=1
         "fov_axis": fov_axis,
         "shutter_open": s_open,
         "shutter_close": s_close,
-        "to_world": mi.ScalarTransform4f.look_at(
+        "to_world": mi.ScalarTransform4f().look_at(
             origin=o,
             target=t,
             up=[0, 1, 0]
@@ -49,7 +49,7 @@ def test01_create(variant_scalar_rgb, origin, direction, s_open, s_time):
     assert not camera.needs_aperture_sample()
     assert camera.bbox() == mi.BoundingBox3f(origin, origin)
     assert dr.allclose(camera.world_transform().matrix,
-                       mi.Transform4f.look_at(origin, mi.Vector3f(origin) + direction, [0, 1, 0]).matrix)
+                       mi.Transform4f().look_at(origin, mi.Vector3f(origin) + direction, [0, 1, 0]).matrix)
 
 
 @pytest.mark.parametrize("origin", origins)
@@ -70,7 +70,7 @@ def test02_sample_ray(variants_vec_spectral, origin, direction):
     wav, spec = mi.sample_rgb_spectrum(mi.sample_shifted(wav_sample))
 
     assert dr.allclose(ray.wavelengths, wav)
-    assert dr.allclose(spec_weight, spec)
+    assert dr.allclose(mi.unpolarized_spectrum(spec_weight), spec)
     assert dr.allclose(ray.time, time)
 
     inv_z = dr.rcp((camera.world_transform().inverse() @ ray.d).z)
@@ -101,7 +101,7 @@ def test03_sample_ray_differential(variants_vec_spectral, origin, direction):
     wav, spec = mi.sample_rgb_spectrum(mi.sample_shifted(wav_sample))
 
     assert dr.allclose(ray.wavelengths, wav)
-    assert dr.allclose(spec_weight, spec)
+    assert dr.allclose(mi.unpolarized_spectrum(spec_weight), spec)
     assert dr.allclose(ray.time, time)
 
     inv_z = dr.rcp((camera.world_transform().inverse() @ ray.d).z)
@@ -169,7 +169,7 @@ def test05_spectrum_sampling(variants_vec_spectral):
         'type': 'perspective',
     })
     wavelengths, _ = camera.sample_wavelengths(dr.zeros(mi.SurfaceInteraction3f), mi.Float([0.1, 0.4, 0.9]))
-    assert (dr.all_nested((wavelengths >= mi.MI_CIE_MIN) & (wavelengths <= mi.MI_CIE_MAX)))
+    assert (dr.all((wavelengths >= mi.MI_CIE_MIN) & (wavelengths <= mi.MI_CIE_MAX), axis=None))
 
     # Check custom SRF wavelength sampling
     camera = mi.load_dict({
@@ -180,7 +180,7 @@ def test05_spectrum_sampling(variants_vec_spectral):
         }
     })
     wavelengths, _ =  camera.sample_wavelengths(dr.zeros(mi.SurfaceInteraction3f), mi.Float([0.1, 0.4, 0.9]))
-    assert (dr.all_nested((wavelengths >= 1200) & (wavelengths <= 1400)))
+    assert (dr.all((wavelengths >= 1200) & (wavelengths <= 1400), axis=None))
 
     # Check error if double SRF is defined
     with pytest.raises(RuntimeError, match=r'Sensor\(\)'):

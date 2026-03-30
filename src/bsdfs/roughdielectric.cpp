@@ -113,6 +113,9 @@ meaningful and mutually compatible index of refraction changes---see the
 section about :ref:`correctness considerations <bsdf-correctness>` for a
 description of what this entails.
 
+.. warning::
+    This BSDF does not have support for polarized variants.
+
 The following XML snippet describes a material definition for rough glass:
 
 .. tabs::
@@ -161,10 +164,10 @@ public:
 
     RoughDielectric(const Properties &props) : Base(props) {
         if (props.has_property("specular_reflectance"))
-            m_specular_reflectance   = props.texture<Texture>("specular_reflectance", 1.f);
+            m_specular_reflectance   = props.get_texture<Texture>("specular_reflectance", 1.f);
 
         if (props.has_property("specular_transmittance"))
-            m_specular_transmittance = props.texture<Texture>("specular_transmittance", 1.f);
+            m_specular_transmittance = props.get_texture<Texture>("specular_transmittance", 1.f);
 
         // Specifies the internal index of refraction at the interface
         ScalarFloat int_ior = lookup_ior(props, "int_ior", "bk7");
@@ -180,7 +183,7 @@ public:
         m_inv_eta = ext_ior / int_ior;
 
         if (props.has_property("distribution")) {
-            std::string distr = string::to_lower(props.string("distribution"));
+            std::string distr = string::to_lower(props.get<std::string_view>("distribution"));
             if (distr == "beckmann")
                 m_type = MicrofacetType::Beckmann;
             else if (distr == "ggx")
@@ -200,10 +203,10 @@ public:
             if (props.has_property("alpha"))
                 Throw("Microfacet model: please specify"
                       "either 'alpha' or 'alpha_u'/'alpha_v'.");
-            m_alpha_u = props.texture<Texture>("alpha_u");
-            m_alpha_v = props.texture<Texture>("alpha_v");
+            m_alpha_u = props.get_unbounded_texture<Texture>("alpha_u");
+            m_alpha_v = props.get_unbounded_texture<Texture>("alpha_v");
         } else {
-            m_alpha_u = m_alpha_v = props.texture<Texture>("alpha", 0.1f);
+            m_alpha_u = m_alpha_v = props.get_unbounded_texture<Texture>("alpha", 0.1f);
         }
 
         BSDFFlags extra = (m_alpha_u != m_alpha_v) ? BSDFFlags::Anisotropic : BSDFFlags(0);
@@ -212,24 +215,23 @@ public:
         m_components.push_back(BSDFFlags::GlossyTransmission | BSDFFlags::FrontSide |
                                BSDFFlags::BackSide | BSDFFlags::NonSymmetric | extra);
         m_flags = m_components[0] | m_components[1];
-        dr::set_attr(this, "flags", m_flags);
 
         parameters_changed();
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_parameter("eta", m_eta, ParamFlags::Differentiable | ParamFlags::Discontinuous);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("eta", m_eta, ParamFlags::Differentiable | ParamFlags::Discontinuous);
 
         if (!has_flag(m_flags, BSDFFlags::Anisotropic))
-            callback->put_object("alpha",                  m_alpha_u.get(),                ParamFlags::Differentiable | ParamFlags::Discontinuous);
+            cb->put("alpha", m_alpha_u, ParamFlags::Differentiable | ParamFlags::Discontinuous);
         else {
-            callback->put_object("alpha_u",                m_alpha_u.get(),                ParamFlags::Differentiable | ParamFlags::Discontinuous);
-            callback->put_object("alpha_v",                m_alpha_v.get(),                ParamFlags::Differentiable | ParamFlags::Discontinuous);
+            cb->put("alpha_u", m_alpha_u, ParamFlags::Differentiable | ParamFlags::Discontinuous);
+            cb->put("alpha_v", m_alpha_v, ParamFlags::Differentiable | ParamFlags::Discontinuous);
         }
         if (m_specular_reflectance)
-            callback->put_object("specular_reflectance",   m_specular_reflectance.get(),   +ParamFlags::Differentiable);
+            cb->put("specular_reflectance", m_specular_reflectance, ParamFlags::Differentiable);
         if (m_specular_transmittance)
-            callback->put_object("specular_transmittance", m_specular_transmittance.get(), +ParamFlags::Differentiable);
+            cb->put("specular_transmittance", m_specular_transmittance, ParamFlags::Differentiable);
     }
 
     void parameters_changed(const std::vector<std::string> &/*keys*/ = {}) override {
@@ -253,7 +255,7 @@ public:
         Float cos_theta_i = Frame3f::cos_theta(si.wi);
 
         // Ignore perfectly grazing configurations
-        active &= dr::neq(cos_theta_i, 0.f);
+        active &= cos_theta_i != 0.f;
 
         /* Construct the microfacet distribution matching the roughness values at the current surface position. */
         MicrofacetDistribution distr(m_type,
@@ -272,7 +274,7 @@ public:
         Normal3f m;
         std::tie(m, bs.pdf) =
             sample_distr.sample(dr::mulsign(si.wi, cos_theta_i), sample2);
-        active &= dr::neq(bs.pdf, 0.f);
+        active &= bs.pdf != 0.f;
 
         auto [F, cos_theta_t, eta_it, eta_ti] =
             fresnel(dr::dot(si.wi, m), m_eta);
@@ -287,7 +289,9 @@ public:
                 Sampling weights should be computed accordingly. */
             if constexpr (dr::is_diff_v<Float>) {
                 if (dr::grad_enabled(F)) {
-                    weight = dr::select(selected_r, F / dr::detach(F), (1 - F) / (1.f - dr::detach(F)));
+                    Float r_diff = dr::replace_grad(Float(1.f), F / dr::detach(F));
+                    Float t_diff = dr::replace_grad(Float(1.f), (1.f - F) / (1.f - dr::detach(F)));
+                    weight = dr::select(selected_r, r_diff, t_diff);
                 }
             }
             bs.pdf *= dr::detach(dr::select(selected_r, F, 1.f - F));
@@ -329,7 +333,7 @@ public:
 
             /* For transmission, radiance must be scaled to account for the solid
                angle compression that occurs when crossing the interface. */
-            UnpolarizedSpectrum factor = (ctx.mode == TransportMode::Radiance) ? dr::sqr(eta_ti) : Float(1.f);
+            UnpolarizedSpectrum factor = (ctx.mode == TransportMode::Radiance) ? dr::square(eta_ti) : Float(1.f);
 
             if (m_specular_transmittance)
                 factor *= m_specular_transmittance->eval(si, selected_t);
@@ -338,8 +342,8 @@ public:
 
             // Jacobian of the half-direction mapping
             dr::masked(dwh_dwo, selected_t) =
-                (dr::sqr(bs.eta) * dr::dot(bs.wo, m)) /
-                 dr::sqr(dr::dot(si.wi, m) + bs.eta * dr::dot(bs.wo, m));
+                (dr::square(bs.eta) * dr::dot(bs.wo, m)) /
+                 dr::square(dr::dot(si.wi, m) + bs.eta * dr::dot(bs.wo, m));
         }
 
         if (likely(m_sample_visible))
@@ -361,7 +365,7 @@ public:
               cos_theta_o = Frame3f::cos_theta(wo);
 
         // Ignore perfectly grazing configurations
-        active &= dr::neq(cos_theta_i, 0.f);
+        active &= cos_theta_i != 0.f;
 
         // Determine the type of interaction
         bool has_reflection   = ctx.is_enabled(BSDFFlags::GlossyReflection, 0),
@@ -413,12 +417,12 @@ public:
             /* Missing term in the original paper: account for the solid angle
                compression when tracing radiance -- this is necessary for
                bidirectional methods. */
-            Float scale = (ctx.mode == TransportMode::Radiance) ? dr::sqr(inv_eta) : Float(1.f);
+            Float scale = (ctx.mode == TransportMode::Radiance) ? dr::square(inv_eta) : Float(1.f);
 
             // Compute the total amount of transmission
             UnpolarizedSpectrum value = dr::abs(
                 (scale * (1.f - F) * D * G * eta * eta * dr::dot(si.wi, m) * dr::dot(wo, m)) /
-                (cos_theta_i * dr::sqr(dr::dot(si.wi, m) + eta * dr::dot(wo, m))));
+                (cos_theta_i * dr::square(dr::dot(si.wi, m) + eta * dr::dot(wo, m))));
 
             if (m_specular_transmittance)
                 value *= m_specular_transmittance->eval(si, eval_t);
@@ -437,7 +441,7 @@ public:
               cos_theta_o = Frame3f::cos_theta(wo);
 
         // Ignore perfectly grazing configurations
-        active &= dr::neq(cos_theta_i, 0.f);
+        active &= cos_theta_i != 0.f;
 
         // Determine the type of interaction
         bool has_reflection   = ctx.is_enabled(BSDFFlags::GlossyReflection, 0),
@@ -466,7 +470,7 @@ public:
         // Jacobian of the half-direction mapping
         Float dwh_dwo = dr::select(reflect, dr::rcp(4.f * dr::dot(wo, m)),
                                (eta * eta * dr::dot(wo, m)) /
-                                   dr::sqr(dr::dot(si.wi, m) + eta * dr::dot(wo, m)));
+                                   dr::square(dr::dot(si.wi, m) + eta * dr::dot(wo, m)));
 
         /* Construct the microfacet distribution matching the
            roughness values at the current surface position. */
@@ -504,7 +508,7 @@ public:
               cos_theta_o = Frame3f::cos_theta(wo);
 
         // Ignore perfectly grazing configurations
-        active &= dr::neq(cos_theta_i, 0.f);
+        active &= cos_theta_i != 0.f;
 
         // Determine the type of interaction
         bool has_reflection   = ctx.is_enabled(BSDFFlags::GlossyReflection, 0),
@@ -569,12 +573,12 @@ public:
             /* Missing term in the original paper: account for the solid angle
                compression when tracing radiance -- this is necessary for
                bidirectional methods. */
-            Float scale = (ctx.mode == TransportMode::Radiance) ? dr::sqr(inv_eta) : Float(1.f);
+            Float scale = (ctx.mode == TransportMode::Radiance) ? dr::square(inv_eta) : Float(1.f);
 
             // Compute the total amount of transmission
             UnpolarizedSpectrum value = dr::abs(
                 (scale * (1.f - F) * D * G * eta * eta * dot_wi_m * dot_wo_m) /
-                (cos_theta_i * dr::sqr(dot_wi_m + eta * dot_wo_m)));
+                (cos_theta_i * dr::square(dot_wi_m + eta * dot_wo_m)));
 
             if (m_specular_transmittance)
                 value *= m_specular_transmittance->eval(si, eval_t);
@@ -597,7 +601,7 @@ public:
         // Jacobian of the half-direction mapping
         Float dwh_dwo = dr::select(reflect, dr::rcp(4.f * dot_wo_m),
                                    (eta * eta * dot_wo_m) /
-                                       dr::sqr(dot_wi_m + eta * dot_wo_m));
+                                       dr::square(dot_wi_m + eta * dot_wo_m));
 
         return { depolarizer<Spectrum>(result),
                  dr::select(active, pdf * dr::abs(dwh_dwo), 0.f) };
@@ -627,7 +631,7 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(RoughDielectric)
 private:
     ref<Texture> m_specular_reflectance;
     ref<Texture> m_specular_transmittance;
@@ -635,8 +639,10 @@ private:
     ref<Texture> m_alpha_u, m_alpha_v;
     Float m_eta, m_inv_eta;
     bool m_sample_visible;
+
+    MI_TRAVERSE_CB(Base, m_specular_reflectance, m_specular_transmittance,
+                   m_alpha_u, m_alpha_v, m_eta, m_inv_eta)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(RoughDielectric, BSDF)
-MI_EXPORT_PLUGIN(RoughDielectric, "Rough dielectric")
+MI_EXPORT_PLUGIN(RoughDielectric)
 NAMESPACE_END(mitsuba)

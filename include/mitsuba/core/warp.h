@@ -74,8 +74,8 @@ MI_INLINE Point<Value, 2> square_to_uniform_disk_concentric(const Point<Value, 2
         }
     */
 
-    Mask is_zero         = dr::eq(x, 0.f) &&
-                           dr::eq(y, 0.f),
+    Mask is_zero         = (x == 0.f) &&
+                           (y == 0.f),
          quadrant_1_or_3 = dr::abs(x) < dr::abs(y);
 
     Value r  = dr::select(quadrant_1_or_3, y, x),
@@ -143,7 +143,7 @@ square_to_uniform_square_concentric(const Point<Value, 2> &sample) {
     dr::masked(phi, r < 0.f) += 0.5f;
     dr::masked(phi, phi < 0.f) += 1.f;
 
-    return { phi, dr::sqr(r) };
+    return { phi, dr::square(r) };
 }
 
 // =======================================================================
@@ -277,6 +277,98 @@ MI_INLINE Value square_to_uniform_sphere_pdf(const Vector<Value, 3> &v) {
 
 // =======================================================================
 
+/**
+* \brief Uniformly sample a direction in the two spherical lunes defined by the
+* valid boundary directions of two touching faces defined by their normals
+* \c n1 and \c n2.
+*/
+template <typename Value>
+MI_INLINE Vector<Value, 3>
+square_to_uniform_spherical_lune(const Point<Value, 2> &sample,
+                                 const Normal<Value, 3> &n1,
+                                 const Normal<Value, 3> &n2) {
+    using Mask = dr::mask_t<Value>;
+    Value pi = dr::Pi<Value>;
+
+    Value cos_2theta = dr::dot(n1, n2);
+    Value theta = 0.5f * dr::acos(cos_2theta);
+
+    Vector<Value, 3> vec_z = dr::normalize(dr::cross(n1, n2)),
+                     vec_y = dr::normalize(n1 + n2),
+                     vec_x = dr::cross(vec_z, vec_y);
+
+    Value z = dr::fnmadd(2.f, sample.y(), 1.f);
+    Value r = circ(z);
+
+    // Angle in (-theta, theta) & (pi - theta, pi + theta)
+    Value angle = dr::select(
+        sample.x() < 0.5f,
+        sample.x() * 4.f * theta - theta,
+        sample.x() * 4.f * theta + pi - 3.f * theta
+    );
+    auto [s, c] = dr::sincos(angle);
+
+    Vector<Value, 3> d = r * c * vec_x + r * s * vec_y + z * vec_z;
+
+    return d;
+}
+
+/// Inverse of the mapping \ref square_to_uniform_spherical_lune
+template <typename Value>
+MI_INLINE Point<Value, 2>
+uniform_spherical_lune_to_square(const Vector<Value, 3> &d,
+                                 const Normal<Value, 3> &n1,
+                                 const Normal<Value, 3> &n2) {
+    using Mask = dr::mask_t<Value>;
+    Value pi = dr::Pi<Value>;
+
+    Value cos_2theta = dr::dot(n1, n2);
+    Value theta = 0.5f * dr::acos(cos_2theta);
+
+    Vector<Value, 3> vec_z = dr::normalize(dr::cross(n1, n2)),
+                     vec_y = dr::normalize(n1 + n2),
+                     vec_x = dr::cross(vec_z, vec_y);
+
+    Value x = dr::dot(d, vec_x),
+          y = dr::dot(d, vec_y),
+          z = dr::dot(d, vec_z);
+
+    Value angle = dr::atan2(y, x);
+    dr::masked(angle, angle < -dr::Pi<Value> * 0.5f) += dr::TwoPi<Value>;
+
+    drjit::mask_t<Value> positive_x = (x >= 0.f);
+    dr::masked(angle, positive_x) = dr::clip(angle, -theta, theta);
+    dr::masked(angle, !positive_x) = dr::clip(angle, pi - theta, pi + theta);
+
+    // Inverse mapping from (-theta, theta) & (pi - theta, pi + theta)
+    Value sample_x = dr::select(
+        positive_x,
+        (angle + theta) * 0.25f * dr::rcp(theta),
+        (angle + 3.f * theta - pi) * 0.25f * dr::rcp(theta)
+    );
+
+    Point<Value, 2> sample = Point<Value, 2>(sample_x, 0.5f * (1.f - z));
+
+    return sample;
+}
+
+/// Density of \ref square_to_uniform_spherical_lune() w.r.t. solid angles
+template <typename Value>
+MI_INLINE Value
+square_to_uniform_spherical_lune_pdf(const Vector<Value, 3> &d,
+                                     const Normal<Value, 3> &n1,
+                                     const Normal<Value, 3> &n2) {
+    DRJIT_MARK_USED(d);
+    Value cos_2theta = dr::dot(n1, n2);
+    Value theta = 0.5f * dr::acos(cos_2theta);
+
+    Value pdf = dr::rcp(8.f * theta);
+
+    return pdf;
+}
+
+// =======================================================================
+
 /// Uniformly sample a vector on the unit hemisphere with respect to solid angles
 template <typename Value>
 MI_INLINE Vector<Value, 3> square_to_uniform_hemisphere(const Point<Value, 2> &sample) {
@@ -355,7 +447,7 @@ template <typename Value>
 MI_INLINE Value interval_to_linear(Value v0, Value v1, Value sample) {
     return dr::select(
         dr::abs(v0 - v1) > 1e-4f * (v0 + v1),
-        (v0 - dr::safe_sqrt(dr::lerp(dr::sqr(v0), dr::sqr(v1), sample))) / (v0 - v1),
+        (v0 - dr::safe_sqrt(dr::lerp(dr::square(v0), dr::square(v1), sample))) / (v0 - v1),
         sample
     );
 }
@@ -494,7 +586,7 @@ MI_INLINE Vector<Value, 3> square_to_beckmann(const Point<Value, 2> &sample,
     // Approach 1: warping method based on standard disk mapping
     auto [s, c] = dr::sincos(dr::TwoPi<Value> * sample.x());
 
-    Value tan_theta_m_sqr = -dr::sqr(alpha) * dr::log(1.f - sample.y());
+    Value tan_theta_m_sqr = -dr::square(alpha) * dr::log(1.f - sample.y());
     Value cos_theta_m = dr::rsqrt(1 + tan_theta_m_sqr),
           sin_theta_m = circ(cos_theta_m);
 
@@ -504,7 +596,7 @@ MI_INLINE Vector<Value, 3> square_to_beckmann(const Point<Value, 2> &sample,
     Point<Value, 2> p = square_to_uniform_disk_concentric(sample);
     Value r2 = dr::squared_norm(p);
 
-    Value tan_theta_m_sqr = -dr::sqr(alpha) * dr::log(1.f - r2);
+    Value tan_theta_m_sqr = -dr::square(alpha) * dr::log(1.f - r2);
     Value cos_theta_m = dr::rsqrt(1.f + tan_theta_m_sqr);
     p *= dr::safe_sqrt(dr::fnmadd(cos_theta_m, cos_theta_m, 1.f) / r2);
 
@@ -516,11 +608,11 @@ MI_INLINE Vector<Value, 3> square_to_beckmann(const Point<Value, 2> &sample,
 template <typename Value>
 MI_INLINE Point<Value, 2> beckmann_to_square(const Vector<Value, 3> &v, const Value &alpha) {
     Point<Value, 2> p(v.x(), v.y());
-    Value tan_theta_m_sqr = dr::rcp(dr::sqr(v.z())) - 1.f;
+    Value tan_theta_m_sqr = dr::rcp(dr::square(v.z())) - 1.f;
 
-    Value r2 = 1.f - dr::exp(tan_theta_m_sqr * (-1.f / dr::sqr(alpha)));
+    Value r2 = 1.f - dr::exp(tan_theta_m_sqr * (-1.f / dr::square(alpha)));
 
-    p *= dr::safe_sqrt(r2 / (1.f - dr::sqr(v.z())));
+    p *= dr::safe_sqrt(r2 / (1.f - dr::square(v.z())));
 
     return uniform_disk_to_square_concentric(p);
 }
@@ -534,7 +626,7 @@ MI_INLINE Value square_to_beckmann_pdf(const Vector<Value, 3> &m,
     Value temp = Frame::tan_theta(m) / alpha,
           ct   = Frame::cos_theta(m);
 
-    Value result = dr::exp(-dr::sqr(temp)) / (dr::Pi<Value> * dr::sqr(alpha * ct) * ct);
+    Value result = dr::exp(-dr::square(temp)) / (dr::Pi<Value> * dr::square(alpha * ct) * ct);
 
     return dr::select(ct < 1e-9f, 0.f, result);
 }
@@ -562,7 +654,7 @@ MI_INLINE Vector<Value, 3> square_to_von_mises_fisher(const Point<Value, 2> &sam
 #endif
 
     auto [s, c] = dr::sincos(dr::TwoPi<Value> * sample.x());
-    Value sin_theta = dr::safe_sqrt(1.f - dr::sqr(cos_theta));
+    Value sin_theta = dr::safe_sqrt(1.f - dr::square(cos_theta));
     Vector<Value, 3> result = { c * sin_theta, s * sin_theta, cos_theta };
 #else
     // Approach 2: low-distortion warping technique based on concentric disk mapping
@@ -572,12 +664,12 @@ MI_INLINE Vector<Value, 3> square_to_von_mises_fisher(const Point<Value, 2> &sam
           sy = dr::maximum(1.f - r2, 1e-6f),
           cos_theta = 1.f + dr::log(sy + (1.f - sy) * dr::exp(-2.f * kappa)) / kappa;
 
-    p *= dr::safe_sqrt((1.f - dr::sqr(cos_theta)) / r2);
+    p *= dr::safe_sqrt((1.f - dr::square(cos_theta)) / r2);
 
     Vector<Value, 3> result = { p.x(), p.y(), cos_theta };
 #endif
 
-    dr::masked(result, dr::eq(kappa, 0.f)) = square_to_uniform_sphere(sample);
+    dr::masked(result, kappa == 0.f) = square_to_uniform_sphere(sample);
 
     return result;
 }
@@ -621,7 +713,7 @@ template <typename Value>
 Vector<Value, 3> square_to_rough_fiber(const Point<Value, 3> &sample,
                                        const Vector<Value, 3> &wi_,
                                        const Vector<Value, 3> &tangent,
-                                       dr::scalar_t<Value> kappa) {
+                                       Value kappa) {
     using Point2  = Point<Value, 2>;
     using Vector3 = Vector<Value, 3>;
     using Frame3  = Frame<Value>;
@@ -641,7 +733,7 @@ Vector<Value, 3> square_to_rough_fiber(const Point<Value, 3> &sample,
 
     // Sample a roughness perturbation from a vMF distribution
     Vector3 perturbation =
-        square_to_von_mises_fisher(Point2(sample.y(), sample.z()), Value(kappa));
+        square_to_von_mises_fisher(Point2(sample.y(), sample.z()), kappa);
 
     // Express perturbation relative to 'wo'
     wo = Frame3(wo).to_world(perturbation);
@@ -661,7 +753,7 @@ namespace detail {
             Value factor = i + 1.f;
             result += xi / denom;
             xi *= x2;
-            denom *= 4.f * dr::sqr(factor);
+            denom *= 4.f * dr::square(factor);
         }
         return result;
     }
@@ -677,27 +769,59 @@ namespace detail {
 /// Probability density of \ref square_to_rough_fiber()
 template <typename Value, typename Vector3 = Vector<Value, 3>>
 Value square_to_rough_fiber_pdf(const Vector3 &v, const Vector3 &wi, const Vector3 &tangent,
-                                dr::scalar_t<Value> kappa) {
+                                Value kappa) {
     /**
      * Analytic density function described in "An Energy-Conserving Hair Reflectance Model"
      * by Eugene d’Eon, Guillaume Francois, Martin Hill, Joe Letteri, and Jean-Marie Aubry
      *
      * Includes modifications for numerical robustness described here:
-     * https://publons.com/publon/2803
+     * https://dl.acm.org/doi/10.1145/2542355.2542386
      */
-
-    Value cos_theta_i = dr::dot(wi, tangent),
-          cos_theta_o = dr::dot(v, tangent),
-          sin_theta_i = circ(cos_theta_i),
-          sin_theta_o = circ(cos_theta_o);
+    Value sin_theta_i = dr::dot(wi, tangent),
+          sin_theta_o = dr::dot(v, tangent),
+          cos_theta_i = circ(sin_theta_i),
+          cos_theta_o = circ(sin_theta_o);
 
     Value c = cos_theta_i * cos_theta_o * kappa,
           s = sin_theta_i * sin_theta_o * kappa;
 
-    if (kappa > 10.f)
-        return dr::exp(-c + detail::log_i0(s) - kappa + 0.6931f + dr::log(.5f * kappa)) * dr::InvTwoPi<Value>;
-    else
-        return dr::exp(-c) * detail::i0(s) * kappa / (2.f * dr::sinh(kappa)) * dr::InvTwoPi<Value>;
+    return dr::select(
+        kappa > 10.f,
+        dr::exp(-s + detail::log_i0(c) - kappa + 0.6931f + dr::log(.5f * kappa)) * dr::InvTwoPi<Value>,
+        dr::exp(-s) * detail::i0(c) * kappa / (2.f * dr::sinh(kappa)) * dr::InvTwoPi<Value>
+    );
+}
+
+//! @}
+// =======================================================================
+
+// =======================================================================
+//! @{ \name Warping techniques for surface tangents
+// =======================================================================
+
+/// Warp a uniformly distributed sample on [0, 1] to a direction in the tangent plane
+template <typename Value>
+MI_INLINE Vector<Value, 3>
+interval_to_tangent_direction(const Normal<Value, 3> &n, Value sample) {
+    using Frame3 = Frame<Value>;
+
+    Frame3 frame(n);
+    Value sin(0), cos(0);
+    std::tie(sin, cos) = dr::sincos(sample * dr::TwoPi<Value>);
+    return frame.s * cos + frame.t * sin;
+}
+
+/// Inverse of \ref uniform_to_tangent_direction
+template <typename Value>
+MI_INLINE Value tangent_direction_to_interval(const Normal<Value, 3> &n,
+                                              const Vector<Value, 3> &d) {
+    using Frame3 = Frame<Value>;
+
+    Frame3 frame(n);
+    Value t = dr::atan2(dr::dot(d, frame.t), dr::dot(d, frame.s));
+    dr::masked(t, t < 0.f) += dr::TwoPi<Value>;
+    t *= dr::InvTwoPi<Value>;
+    return t;
 }
 
 //! @}

@@ -33,7 +33,6 @@ public:
 
     IsotropicPhaseFunction(const Properties & props) : Base(props) {
         m_flags = +PhaseFunctionFlags::Isotropic;
-        dr::set_attr(this, "flags", m_flags);
         m_components.push_back(m_flags);
     }
 
@@ -60,10 +59,9 @@ public:
 
     std::string to_string() const override { return "IsotropicPhaseFunction[]"; }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(IsotropicPhaseFunction)
 private:
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(IsotropicPhaseFunction, PhaseFunction)
-MI_EXPORT_PLUGIN(IsotropicPhaseFunction, "Isotropic phase function")
+MI_EXPORT_PLUGIN(IsotropicPhaseFunction)
 NAMESPACE_END(mitsuba)

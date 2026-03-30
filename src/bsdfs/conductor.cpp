@@ -223,26 +223,25 @@ public:
 
     SmoothConductor(const Properties &props) : Base(props) {
         m_flags = BSDFFlags::DeltaReflection | BSDFFlags::FrontSide;
-        dr::set_attr(this, "flags", m_flags);
         m_components.push_back(m_flags);
 
-        m_specular_reflectance = props.texture<Texture>("specular_reflectance", 1.f);
+        m_specular_reflectance = props.get_texture<Texture>("specular_reflectance", 1.f);
 
-        std::string material = props.string("material", "none");
+        std::string_view material = props.get<std::string_view>("material", "none");
         if (props.has_property("eta") || material == "none") {
-            m_eta = props.texture<Texture>("eta", 0.f);
-            m_k   = props.texture<Texture>("k",   1.f);
+            m_eta = props.get_unbounded_texture<Texture>("eta", 0.f);
+            m_k   = props.get_unbounded_texture<Texture>("k",   1.f);
             if (material != "none")
                 Throw("Should specify either (eta, k) or material, not both.");
         } else {
-            std::tie(m_eta, m_k) = complex_ior_from_file<Spectrum, Texture>(props.string("material", "Cu"));
+            std::tie(m_eta, m_k) = complex_ior_from_file<Spectrum, Texture>(props.get<std::string_view>("material", "Cu"));
         }
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_object("eta",                  m_eta.get(),                  ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_object("k",                    m_k.get(),                    ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_object("specular_reflectance", m_specular_reflectance.get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("eta",                  m_eta,                  ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        cb->put("k",                    m_k,                    ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        cb->put("specular_reflectance", m_specular_reflectance, ParamFlags::Differentiable);
     }
 
     std::pair<BSDFSample3f, Spectrum> sample(const BSDFContext &ctx,
@@ -284,8 +283,15 @@ public:
             /* The Stokes reference frame vector of this matrix lies perpendicular
                to the plane of reflection. */
             Vector3f n(0, 0, 1);
-            Vector3f s_axis_in  = dr::normalize(dr::cross(n, -wo_hat)),
-                     s_axis_out = dr::normalize(dr::cross(n, wi_hat));
+            Vector3f s_axis_in  = dr::cross(n, -wo_hat);
+            Vector3f s_axis_out = dr::cross(n, wi_hat);
+
+            // Singularity when the input & output are collinear with the normal
+            Mask collinear = dr::all(s_axis_in == Vector3f(0));
+            s_axis_in  = dr::select(collinear, Vector3f(1, 0, 0),
+                                               dr::normalize(s_axis_in));
+            s_axis_out = dr::select(collinear, Vector3f(1, 0, 0),
+                                               dr::normalize(s_axis_out));
 
             /* Rotate in/out reference vector of `value` s.t. it aligns with the
                implicit Stokes bases of -wo_hat & wi_hat. */
@@ -320,12 +326,13 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(SmoothConductor)
 private:
     ref<Texture> m_specular_reflectance;
     ref<Texture> m_eta, m_k;
+
+    MI_TRAVERSE_CB(Base, m_specular_reflectance, m_eta, m_k)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(SmoothConductor, BSDF)
-MI_EXPORT_PLUGIN(SmoothConductor, "Smooth conductor")
+MI_EXPORT_PLUGIN(SmoothConductor)
 NAMESPACE_END(mitsuba)

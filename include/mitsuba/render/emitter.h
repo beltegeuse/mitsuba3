@@ -4,7 +4,7 @@
 #include <mitsuba/core/transform.h>
 #include <mitsuba/render/endpoint.h>
 #include <mitsuba/render/fwd.h>
-#include <drjit/vcall.h>
+#include <drjit/call.h>
 
 NAMESPACE_BEGIN(mitsuba)
 
@@ -77,13 +77,11 @@ public:
     /// Modify the emitter's "dirty" flag
     void set_dirty(bool dirty) { m_dirty = dirty; }
 
-    DRJIT_VCALL_REGISTER(Float, mitsuba::Emitter)
+    /// This is both a class and the base of various Mitsuba plugins
+    MI_DECLARE_PLUGIN_BASE_CLASS(Emitter)
 
-    MI_DECLARE_CLASS()
 protected:
     Emitter(const Properties &props);
-
-    virtual ~Emitter();
 
 protected:
     /// Combined flags for all properties of this emitter.
@@ -92,32 +90,34 @@ protected:
     /// Sampling weight
     ScalarFloat m_sampling_weight;
 
-    /// True if the emitters's parameters have changed
+    /// True if the emitter's parameters have changed
     bool m_dirty = false;
+
+    MI_TRAVERSE_CB(Base)
 };
 
 MI_EXTERN_CLASS(Emitter)
 NAMESPACE_END(mitsuba)
 
 // -----------------------------------------------------------------------
-//! @{ \name Dr.Jit support for vectorized function calls
+//! @{ \name Enables vectorized method calls on Dr.Jit arrays of emitters
 // -----------------------------------------------------------------------
 
-DRJIT_VCALL_TEMPLATE_BEGIN(mitsuba::Emitter)
-    DRJIT_VCALL_METHOD(sample_ray)
-    DRJIT_VCALL_METHOD(sample_direction)
-    DRJIT_VCALL_METHOD(pdf_direction)
-    DRJIT_VCALL_METHOD(eval_direction)
-    DRJIT_VCALL_METHOD(sample_position)
-    DRJIT_VCALL_METHOD(pdf_position)
-    DRJIT_VCALL_METHOD(eval)
-    DRJIT_VCALL_METHOD(sample_wavelengths)
-    DRJIT_VCALL_METHOD(is_environment)
-    DRJIT_VCALL_GETTER(flags, uint32_t)
-    DRJIT_VCALL_GETTER(shape, const typename Class::Shape *)
-    DRJIT_VCALL_GETTER(medium, const typename Class::Medium *)
-    DRJIT_VCALL_GETTER(sampling_weight, float)
-DRJIT_VCALL_TEMPLATE_END(mitsuba::Emitter)
+DRJIT_CALL_TEMPLATE_BEGIN(mitsuba::Emitter)
+    DRJIT_CALL_METHOD(sample_ray)
+    DRJIT_CALL_METHOD(sample_direction)
+    DRJIT_CALL_METHOD(pdf_direction)
+    DRJIT_CALL_METHOD(eval_direction)
+    DRJIT_CALL_METHOD(sample_position)
+    DRJIT_CALL_METHOD(pdf_position)
+    DRJIT_CALL_METHOD(eval)
+    DRJIT_CALL_METHOD(sample_wavelengths)
+    DRJIT_CALL_GETTER(is_environment)
+    DRJIT_CALL_GETTER(flags)
+    DRJIT_CALL_GETTER(shape)
+    DRJIT_CALL_GETTER(medium)
+    DRJIT_CALL_GETTER(sampling_weight)
+DRJIT_CALL_END()
 
 //! @}
 // -----------------------------------------------------------------------

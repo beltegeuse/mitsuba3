@@ -92,15 +92,13 @@ public:
 
     MaskBSDF(const Properties &props) : Base(props) {
         // Scalar-typed opacity texture
-        m_opacity = props.texture<Texture>("opacity", 0.5f);
+        m_opacity = props.get_texture<Texture>("opacity", .5f);
 
-        for (auto &[name, obj] : props.objects(false)) {
-            auto *bsdf = dynamic_cast<Base *>(obj.get());
-            if (bsdf) {
+        for (auto &prop : props.objects()) {
+            if (Base *bsdf = prop.try_get<Base>()) {
                 if (m_nested_bsdf)
                     Throw("Cannot specify more than one child BSDF");
                 m_nested_bsdf = bsdf;
-                props.mark_queried(name);
             }
         }
         if (!m_nested_bsdf)
@@ -113,12 +111,11 @@ public:
         // The "transmission" BSDF component is at the last index.
         m_components.push_back(BSDFFlags::Null | BSDFFlags::FrontSide | BSDFFlags::BackSide);
         m_flags = m_nested_bsdf->flags() | m_components.back();
-        dr::set_attr(this, "flags", m_flags);
     }
 
-    void traverse(TraversalCallback *callback) override {
-        callback->put_object("opacity",     m_opacity.get(),     ParamFlags::Differentiable | ParamFlags::Discontinuous);
-        callback->put_object("nested_bsdf", m_nested_bsdf.get(), +ParamFlags::Differentiable);
+    void traverse(TraversalCallback *cb) override {
+        cb->put("opacity", m_opacity, ParamFlags::Differentiable | ParamFlags::Discontinuous);
+        cb->put("nested_bsdf", m_nested_bsdf, ParamFlags::Differentiable);
     }
 
     std::pair<BSDFSample3f, Spectrum> sample(const BSDFContext &ctx,
@@ -147,14 +144,23 @@ public:
         bs.sampled_component = null_index;
         bs.sampled_type      = +BSDFFlags::Null;
         bs.pdf               = 1.f - opacity;
-        result               = 1.f;
+
+        result = 1.f;
+        if constexpr (dr::is_diff_v<Float>) {
+            if (dr::grad_enabled(opacity)) {
+                result = dr::replace_grad(
+                    result,
+                    Spectrum((1.f - opacity) / dr::detach(1.f - opacity)));
+            }
+        }
 
         Mask nested_mask = active && sample1 < opacity;
         if (dr::any_or<true>(nested_mask)) {
             sample1 /= opacity;
             auto tmp                = m_nested_bsdf->sample(ctx, si, sample1, sample2, nested_mask);
             dr::masked(bs, nested_mask) = tmp.first;
-            dr::masked(result, nested_mask) = tmp.second;
+            dr::masked(result, nested_mask) = tmp.second * opacity / dr::detach(opacity);
+            dr::masked(bs.pdf, nested_mask) *= opacity;
         }
 
         return { bs, result };
@@ -217,7 +223,7 @@ public:
     }
 
     MI_INLINE Float eval_opacity(const SurfaceInteraction3f &si, Mask active) const {
-        return dr::clamp(m_opacity->eval_1(si, active), 0.f, 1.f);
+        return dr::clip(m_opacity->eval_1(si, active), 0.f, 1.f);
     }
 
     Spectrum eval_diffuse_reflectance(const SurfaceInteraction3f &si,
@@ -234,12 +240,13 @@ public:
         return oss.str();
     }
 
-    MI_DECLARE_CLASS()
+    MI_DECLARE_CLASS(MaskBSDF)
 private:
     ref<Texture> m_opacity;
     ref<Base> m_nested_bsdf;
+
+    MI_TRAVERSE_CB(Base, m_opacity, m_nested_bsdf)
 };
 
-MI_IMPLEMENT_CLASS_VARIANT(MaskBSDF, BSDF)
-MI_EXPORT_PLUGIN(MaskBSDF, "Mask material")
+MI_EXPORT_PLUGIN(MaskBSDF)
 NAMESPACE_END(mitsuba)

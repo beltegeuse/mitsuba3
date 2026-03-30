@@ -55,3 +55,36 @@ def test02_perspective_projection(variant_scalar_rgb):
                      [0.0, -25.372756958007812, 1.5, 0.0],
                      [0.0, 0.0, 1.010101079940796, -10.1010103225708],
                      [0, 0, 1, 0]]))
+
+
+def test03_trampoline(variants_vec_backends_once_rgb):
+    class DummySensor(mi.Sensor):
+        def __init__(self, props):
+            mi.Sensor.__init__(self, props)
+            self.m_needs_sample_2 = True
+
+        def traverse(self, callback):
+            super().traverse(callback)
+            callback.put('to_world', self.m_to_world,
+                         mi.ParamFlags.NonDifferentiable)
+
+        def to_string(self):
+            return f"DummySensor ({self.m_needs_sample_2})"
+
+    mi.register_sensor('dummy_sensor', DummySensor)
+    sensor = mi.load_dict({
+        'type': 'dummy_sensor'
+    })
+
+    assert str(sensor) == "DummySensor (True)"
+
+    params = mi.traverse(sensor)
+    assert 'to_world' in params
+    transform = mi.ScalarTransform4f.translate([1, 2, 3]).rotate([0, 1, 0], 45)
+    params['to_world'] = transform
+    params.update()
+    params = mi.traverse(sensor)
+    assert dr.allclose(params['to_world'].matrix,
+                       transform.matrix)
+    assert dr.allclose(sensor.world_transform().matrix,
+                       transform.matrix)

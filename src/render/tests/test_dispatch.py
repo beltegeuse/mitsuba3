@@ -14,7 +14,7 @@ def test01_dispatch(variants_vec_rgb, recorded):
     bsdf_ptr = dr.select(mask, mi.BSDFPtr(bsdf1), mi.BSDFPtr(bsdf2))
 
     def func(self, si, wo):
-        print(f'Tracing -> {self.class_().name()}')
+        print(f'Tracing -> {self.class_name()}')
         return self.eval(mi.BSDFContext(), si, wo)
 
     si = dr.zeros(mi.SurfaceInteraction3f)
@@ -58,8 +58,6 @@ def test02_dispatch_sparse_registry(variants_vec_rgb, recorded):
     dr.eval(res)
 
     assert dr.allclose(res, bsdf_ptr.eval(ctx, si, wo))
-
-    dr.registry_trim()
 
     res = dr.dispatch(bsdf_ptr, func, si, wo)
     dr.eval(res)
