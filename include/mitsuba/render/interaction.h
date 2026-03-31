@@ -43,6 +43,9 @@ enum class RayFlags : uint32_t {
     /// Compute the shading normal partials wrt. the UV coordinates
     dNSdUV = 0x20,
 
+    /// Compute the boundary-test used in reparameterized integrators
+    BoundaryTest = 0x40,
+
     // =============================================================
     //!              Differentiability compute flags
     // =============================================================
@@ -228,6 +231,15 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
     /// Stores a pointer to the parent instance (if applicable)
     ShapePtr instance = nullptr;
 
+    /**
+     * Boundary-test value used in reparameterized integrators, a soft indicator
+     * function which returns a zero value at the silhouette of the shape from
+     * the perspective of a given ray. Everywhere else this function will return
+     * non-negative values reflecting the distance of the surface interaction to
+     * this closest point on the silhouette.
+     */
+    Float boundary_test;
+
     //! @}
     // =============================================================
 
@@ -246,7 +258,7 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
                                 const Wavelength &wavelengths)
         : Base(0.f, ps.time, wavelengths, ps.p, ps.n), uv(ps.uv),
           sh_frame(Frame3f(ps.n)), dp_du(0), dp_dv(0), dn_du(0), dn_dv(0),
-          duv_dx(0), duv_dy(0), wi(0), prim_index(0) {}
+          duv_dx(0), duv_dy(0), wi(0), prim_index(0), boundary_test(0) {}
 
     /**
      * This callback method is invoked by dr::zeros<>, and takes care of fields that deviate
@@ -264,6 +276,7 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
         duv_dy      = dr::zeros<Vector2f>(size);
         wi          = dr::zeros<Vector3f>(size);
         prim_index  = dr::zeros<Index>(size);
+        boundary_test = dr::zeros<Float>(size);
 
         if constexpr (dr::is_jit_v<Float_>) {
             shape       = dr::zeros<ShapePtr>(size);
@@ -513,6 +526,9 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
         wi = dr::select(active, to_local(-ray.d), -ray.d);
 
         duv_dx = duv_dy = dr::zeros<Point2f>();
+
+        if (has_flag(ray_flags, RayFlags::BoundaryTest))
+            boundary_test = dr::select(active, dr::detach(boundary_test), 1e8f);
     }
 
     /// Convenience operator for masking
@@ -526,7 +542,7 @@ struct SurfaceInteraction : Interaction<Float_, Spectrum_> {
 
     DRJIT_STRUCT(SurfaceInteraction, t, time, wavelengths, p, n, shape, uv,
                  sh_frame, dp_du, dp_dv, dn_du, dn_dv, duv_dx,
-                 duv_dy, wi, prim_index, instance)
+                 duv_dy, wi, prim_index, instance, boundary_test)
 };
 
 // -----------------------------------------------------------------------------

@@ -7675,6 +7675,8 @@ static const char *__doc_mitsuba_RayFlags_All = R"doc(//! Compound compute flags
 
 static const char *__doc_mitsuba_RayFlags_AllNonDifferentiable = R"doc(Compute all fields of the surface interaction ignoring shape's motion)doc";
 
+static const char *__doc_mitsuba_RayFlags_BoundaryTest = R"doc(Compute the boundary-test used in reparameterized integrators)doc";
+
 static const char *__doc_mitsuba_RayFlags_DetachShape = R"doc(Derivatives of the SurfaceInteraction fields ignore shape's motion)doc";
 
 static const char *__doc_mitsuba_RayFlags_Empty = R"doc(No flags set)doc";
@@ -10540,6 +10542,10 @@ static const char *__doc_mitsuba_SurfaceInteraction_has_uv_partials = R"doc()doc
 static const char *__doc_mitsuba_SurfaceInteraction_initialize_sh_frame = R"doc(Initialize local shading frame using Gram-schmidt orthogonalization)doc";
 
 static const char *__doc_mitsuba_SurfaceInteraction_instance = R"doc(Stores a pointer to the parent instance (if applicable))doc";
+
+static const char *__doc_mitsuba_SurfaceInteraction_boundary_test = R"doc(Boundary-test value used in reparameterized integrators, a soft indicator
+function which returns a zero value at the silhouette of the shape from
+the perspective of a given ray.)doc";
 
 static const char *__doc_mitsuba_SurfaceInteraction_is_medium_transition = R"doc(Does the surface mark a transition between two media?)doc";
 
